@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Duplicate Finder</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-screen="setup">
+
+  <header class="titlebar">
+    <div class="wordmark">
+      <span class="wordmark__mark" aria-hidden="true"></span>
+      DUPLICATE&nbsp;FINDER
+    </div>
+    <div class="titlebar__meta" id="titlebar-meta"></div>
+  </header>
+
+  <main class="app">
+
+    <!-- ================= SETUP ================= -->
+    <section class="screen" id="screen-setup">
+      <div class="setup-grid">
+
+        <div class="panel">
+          <h2 class="panel__title">Sources</h2>
+          <p class="panel__hint">Folders to search. Every file inside, at any depth, gets checked.</p>
+
+          <ul class="source-list" id="source-list"></ul>
+
+          <p class="empty-note" id="source-empty">No folders added yet.</p>
+
+          <button class="btn btn--ghost" id="btn-add-folder" type="button">+ Add folder</button>
+        </div>
+
+        <div class="panel">
+          <h2 class="panel__title">Scan parameters</h2>
+
+          <div class="field">
+            <div class="field__row">
+              <label for="tolerance">Duration tolerance</label>
+              <output class="field__readout" id="tolerance-readout" for="tolerance">± 1.5s</output>
+            </div>
+            <input type="range" id="tolerance" min="0" max="5" step="0.1" value="1.5" />
+            <p class="field__hint">Video and audio files whose durations sit inside this window are treated as likely duplicates, even when their size, resolution, or bitrate differ.</p>
+          </div>
+
+          <div class="field">
+            <div class="field__row">
+              <label for="min-size">Ignore files smaller than</label>
+            </div>
+            <select id="min-size">
+              <option value="0">No minimum</option>
+              <option value="4096" selected>4 KB</option>
+              <option value="102400">100 KB</option>
+              <option value="1048576">1 MB</option>
+              <option value="10485760">10 MB</option>
+            </select>
+            <p class="field__hint">Tiny files (icons, empty stubs, thumbnails) rarely matter and slow down hashing.</p>
+          </div>
+
+          <div class="field field--checkbox">
+            <label class="checkbox">
+              <input type="checkbox" id="include-hidden" />
+              <span>Include hidden files and folders</span>
+            </label>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="setup-footer">
+        <p class="setup-footer__note" id="setup-note"></p>
+        <button class="btn btn--primary" id="btn-start-scan" type="button" disabled>Start scan →</button>
+      </div>
+    </section>
+
+    <!-- ================= SCANNING ================= -->
+    <section class="screen" id="screen-scanning">
+      <div class="scan-stats">
+        <div class="stat">
+          <div class="stat__value" id="stat-files">0</div>
+          <div class="stat__label">files found</div>
+        </div>
+        <div class="stat">
+          <div class="stat__value" id="stat-hashed">0</div>
+          <div class="stat__label">candidates hashed</div>
+        </div>
+        <div class="stat">
+          <div class="stat__value" id="stat-probed">0</div>
+          <div class="stat__label">media probed</div>
+        </div>
+      </div>
+
+      <div class="scan-rail">
+        <div class="scan-rail__fill" id="scan-rail-fill"></div>
+        <div class="scan-rail__cursor" id="scan-rail-cursor"></div>
+      </div>
+
+      <pre class="scan-log" id="scan-log" aria-live="polite"></pre>
+    </section>
+
+    <!-- ================= RESULTS ================= -->
+    <section class="screen" id="screen-results">
+      <div class="results-summary">
+        <div class="results-summary__text">
+          <span id="summary-files">0 files scanned</span>
+          <span class="dot">·</span>
+          <span id="summary-reclaim">0 B reclaimable</span>
+          <span class="dot">·</span>
+          <span id="summary-time">0ms</span>
+        </div>
+        <button class="btn btn--ghost btn--small" id="btn-new-scan" type="button">New scan</button>
+      </div>
+
+      <p class="ffmpeg-note" id="ffmpeg-note" hidden>
+        ffmpeg isn't available on this machine, so media files could only be checked byte-for-byte. Duration-based matching was skipped.
+      </p>
+
+      <div class="results-body" id="results-body">
+        <section class="group-section" id="section-exact">
+          <h2 class="group-section__title group-section__title--exact">
+            <span class="chip chip--exact">Exact</span>
+            Exact duplicates
+            <span class="group-section__count" id="exact-count"></span>
+          </h2>
+          <p class="group-section__hint">Byte-for-byte identical content, verified with a full-content checksum.</p>
+          <div id="exact-groups"></div>
+        </section>
+
+        <section class="group-section" id="section-media">
+          <h2 class="group-section__title group-section__title--likely">
+            <span class="chip chip--likely">Likely</span>
+            Matched by duration
+            <span class="group-section__count" id="media-count"></span>
+          </h2>
+          <p class="group-section__hint">Same media length within tolerance — sizes and quality may differ. Worth a look before trashing.</p>
+          <div id="media-groups"></div>
+        </section>
+
+        <p class="empty-note empty-note--center" id="results-empty" hidden>No duplicates found. This selection is already clean.</p>
+      </div>
+    </section>
+
+  </main>
+
+  <div class="ledger" id="ledger" hidden>
+    <div class="ledger__text">
+      <span id="ledger-count">0 selected</span>
+      <span class="dot">·</span>
+      <span id="ledger-size">0 B</span>
+    </div>
+    <button class="btn btn--danger" id="btn-trash" type="button">Move to trash</button>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

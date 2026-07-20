@@ -1,0 +1,19 @@
+# Rust / Cargo build output (at any workspace depth)
+target/
+
+# Tauri-generated capability schemas
+src-tauri/gen/schemas/
+src-tauri/target/
+
+# Frontend dependencies and build output
+node_modules/
+dist/
+
+# Local tool state
+.claude/
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
