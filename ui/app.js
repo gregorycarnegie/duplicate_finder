@@ -1,6 +1,8 @@
 (() => {
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
+  const { getCurrentWebview } = window.__TAURI__.webview;
+  const { Menu, MenuItem } = window.__TAURI__.menu;
 
   // ---------------------------------------------------------------
   // state
@@ -120,13 +122,16 @@
     btnStartScan.disabled = state.folders.length === 0;
   }
 
+  function addFolders(folders) {
+    for (const folder of folders) {
+      if (!state.folders.includes(folder)) state.folders.push(folder);
+    }
+    renderSources();
+  }
+
   btnAddFolder.addEventListener("click", async () => {
     try {
-      const picked = await invoke("pick_folders");
-      for (const p of picked) {
-        if (!state.folders.includes(p)) state.folders.push(p);
-      }
-      renderSources();
+      addFolders(await invoke("pick_folders"));
     } catch (err) {
       showToast(String(err), true);
     }
@@ -136,9 +141,7 @@
     toleranceReadout.textContent = `± ${Number(toleranceInput.value).toFixed(1)}s`;
   });
 
-  btnStartScan.addEventListener("click", () => {
-    startScan();
-  });
+  btnStartScan.addEventListener("click", startScan);
 
   // ---------------------------------------------------------------
   // scanning screen
@@ -149,8 +152,6 @@
   const statProbed = document.getElementById("stat-probed");
   const scanRailFill = document.getElementById("scan-rail-fill");
   const scanLog = document.getElementById("scan-log");
-
-  let unlistenProgress = null;
 
   function logLine(text) {
     const line = document.createElement("div");
@@ -181,7 +182,7 @@
 
     const seenFolders = new Set();
 
-    unlistenProgress = await listen("scan-progress", (event) => {
+    const unlistenProgress = await listen("scan-progress", (event) => {
       const p = event.payload;
       if (p.phase === "walking") {
         statFiles.textContent = p.filesFound.toLocaleString();
@@ -216,10 +217,7 @@
       setupNote.textContent = String(err);
       showToast(String(err), true);
     } finally {
-      if (unlistenProgress) {
-        unlistenProgress();
-        unlistenProgress = null;
-      }
+      unlistenProgress();
     }
   }
 
@@ -244,8 +242,51 @@
   const ledgerSize = document.getElementById("ledger-size");
   const btnTrash = document.getElementById("btn-trash");
 
+  let contextFile = null;
+  let contextCheckbox = null;
+  const fileMenu = (async () => {
+    const selectItem = await MenuItem.new({
+      text: "Select for trash",
+      action: () => {
+        if (!contextFile) return;
+        if (state.selected.has(contextFile.path)) state.selected.delete(contextFile.path);
+        else state.selected.add(contextFile.path);
+        contextCheckbox.checked = state.selected.has(contextFile.path);
+        updateLedger();
+      },
+    });
+    const menu = await Menu.new({
+      items: [
+        { text: "Open", action: () => openFile(contextFile) },
+        { text: "Show in folder", action: () => revealFile(contextFile) },
+        selectItem,
+      ],
+    });
+    return { menu, selectItem };
+  })();
+
+  function openFile(file) {
+    if (file) invoke("open_file", { path: file.path }).catch((err) => showToast(String(err), true));
+  }
+
+  function revealFile(file) {
+    if (file) invoke("reveal_file", { path: file.path }).catch((err) => showToast(String(err), true));
+  }
+
+  async function showFileMenu(event, file, checkbox) {
+    event.preventDefault();
+    contextFile = file;
+    contextCheckbox = checkbox;
+    try {
+      const { menu, selectItem } = await fileMenu;
+      await selectItem.setText(state.selected.has(file.path) ? "Unselect" : "Select for trash");
+      await menu.popup();
+    } catch (err) {
+      showToast(String(err), true);
+    }
+  }
+
   function mediaBadge(media) {
-    if (!media) return "";
     const dims = media.width && media.height ? `${media.width}×${media.height} ` : "";
     const codec = media.codec ? `${media.codec.toUpperCase()} ` : "";
     return `${dims}${codec}${formatDuration(media.durationSecs)}`;
@@ -263,11 +304,13 @@
       else state.selected.delete(file.path);
       updateLedger();
     });
+    row.addEventListener("contextmenu", (event) => showFileMenu(event, file, checkbox));
 
     const path = document.createElement("span");
     path.className = "dupe-file__path";
     path.textContent = file.path;
-    path.title = file.path;
+    path.title = `Double-click to open ${file.path}`;
+    path.addEventListener("dblclick", () => openFile(file));
 
     const media = document.createElement("span");
     media.className = "dupe-file__media";
@@ -292,7 +335,9 @@
     if (kind === "exact") {
       left.textContent = `${group.files.length} files · ${formatBytes(group.files[0].size)} each`;
     } else {
-      left.textContent = `${group.files.length} files · duration spread ${group.matchKind.spreadSecs.toFixed(2)}s`;
+      const durations = group.files.map((file) => file.media.durationSecs);
+      const spread = Math.max(...durations) - Math.min(...durations);
+      left.textContent = `${group.files.length} files · duration spread ${spread.toFixed(2)}s`;
     }
 
     const right = document.createElement("span");
@@ -392,4 +437,17 @@
   // ---------------------------------------------------------------
 
   renderSources();
+  document.addEventListener("contextmenu", (event) => event.preventDefault());
+  getCurrentWebview()
+    .onDragDropEvent(async ({ payload }) => {
+      if (payload.type !== "drop" || document.body.dataset.screen !== "setup") return;
+      try {
+        const folders = await invoke("folders_from_paths", { paths: payload.paths });
+        addFolders(folders);
+        if (folders.length !== payload.paths.length) showToast("Only folders can be added.", true);
+      } catch (err) {
+        showToast(String(err), true);
+      }
+    })
+    .catch((err) => showToast(String(err), true));
 })();

@@ -75,7 +75,6 @@ button {
   flex: none;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   padding: 14px 28px;
   border-bottom: 1px solid var(--hairline);
 }
@@ -108,13 +107,6 @@ button {
   background: var(--exact);
   left: 4px;
   top: -4px;
-}
-
-.titlebar__meta {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--paper-faint);
-  letter-spacing: 0.04em;
 }
 
 /* ---------------- layout ---------------- */
@@ -450,10 +442,6 @@ select {
   color: var(--paper-faint);
   white-space: pre-wrap;
   word-break: break-all;
-}
-
-.scan-log .log-line--done {
-  color: var(--paper-dim);
 }
 
 /* ---------------- results screen ---------------- */

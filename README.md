@@ -13,6 +13,7 @@ Built with Rust, Tauri 2, and a lightweight HTML/CSS/JavaScript interface.
 ## Features
 
 - Scan one or more folders recursively.
+- Add scan folders with the picker or drag and drop.
 - Find exact duplicates using full-file BLAKE3 hashes.
 - Avoid unnecessary work by hashing only files that share a file size.
 - Find likely duplicate audio and video files by duration.
@@ -20,6 +21,7 @@ Built with Rust, Tauri 2, and a lightweight HTML/CSS/JavaScript interface.
 - Exclude small files and hidden files or folders.
 - View live scanning, probing, and hashing progress.
 - Review file sizes, dates, codecs, resolutions, and durations.
+- Double-click a file path to open it in its default application.
 - Select unwanted copies and move them to the operating system's trash or recycle bin.
 
 Duration matches are suggestions, not proof that two files contain the same content. Review likely matches before moving anything to the trash.
@@ -28,7 +30,7 @@ Duration matches are suggestions, not proof that two files contain the same cont
 
 - [Rust](https://www.rust-lang.org/tools/install)
 - Tauri 2 system dependencies for your operating system
-- FFmpeg development libraries
+- FFmpeg (`ffprobe` must be on `PATH` for duration-based matching)
 - The Tauri CLI
 
 Install the Tauri CLI with:
@@ -39,15 +41,13 @@ cargo install tauri-cli --version "^2"
 
 ### Debian or Ubuntu
 
-Install the Tauri and FFmpeg development dependencies with:
+Install the Tauri dependencies and FFmpeg with:
 
 ```sh
 sudo apt update
 sudo apt install build-essential curl file wget libxdo-dev \
-  libayatana-appindicator3-dev \
-  libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
-  libavutil-dev libssl-dev libswresample-dev libswscale-dev \
-  libwebkit2gtk-4.1-dev librsvg2-dev
+  libayatana-appindicator3-dev libssl-dev \
+  libwebkit2gtk-4.1-dev librsvg2-dev ffmpeg
 ```
 
 Package names differ between Linux distributions.
@@ -60,10 +60,10 @@ Install Apple's command-line developer tools:
 xcode-select --install
 ```
 
-Then install FFmpeg and `pkg-config` with [Homebrew](https://brew.sh/):
+Then install FFmpeg with [Homebrew](https://brew.sh/):
 
 ```sh
-brew install ffmpeg pkg-config
+brew install ffmpeg
 ```
 
 Full Xcode is not required for desktop-only development, but it is required if you intend to target iOS.
@@ -78,16 +78,9 @@ Full Xcode is not required for desktop-only development, but it is required if y
    rustup default stable-msvc
    ```
 
-4. Install FFmpeg development libraries using [vcpkg](https://github.com/microsoft/vcpkg):
+4. Install an [FFmpeg Windows build](https://ffmpeg.org/download.html#build-windows) and add its `bin` directory to `PATH`.
 
-   ```powershell
-   git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
-   C:\vcpkg\bootstrap-vcpkg.bat
-   C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows
-   [Environment]::SetEnvironmentVariable("VCPKG_ROOT", "C:\vcpkg", "User")
-   ```
-
-Restart the terminal after setting `VCPKG_ROOT`. If an MSI build fails while running `light.exe`, enable the **VBSCRIPT** Windows optional feature; Tauri needs it when the bundle target is `msi` or `all`.
+   Verify the installation in a new terminal with `ffprobe -version`. FFmpeg is optional: without it, exact duplicate scanning still works and duration-based matching is skipped. If an MSI build fails while running `light.exe`, enable the **VBSCRIPT** Windows optional feature; Tauri needs it when the bundle target is `msi` or `all`.
 
 See the [official Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for additional platforms and troubleshooting.
 

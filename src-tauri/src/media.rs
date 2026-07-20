@@ -1,7 +1,14 @@
-use crate::model::{DuplicateFile, DuplicateGroup, FileEntry, MatchKind, MediaInfo, MediaKind};
+use crate::model::{DuplicateFile, DuplicateGroup, FileEntry, MediaInfo, MediaKind};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use serde::Deserialize;
+use std::{
+    collections::{HashMap, HashSet},
+    process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 const VIDEO_EXT: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "ts", "vob",
@@ -24,47 +31,78 @@ pub fn media_kind_for(path: &str) -> Option<MediaKind> {
     }
 }
 
-/// Initializes ffmpeg. Returns false (without panicking) if it's unavailable,
+#[derive(Deserialize)]
+struct ProbeOutput {
+    format: ProbeFormat,
+    streams: Vec<ProbeStream>,
+}
+
+#[derive(Deserialize)]
+struct ProbeFormat {
+    duration: String,
+}
+
+#[derive(Default, Deserialize)]
+struct ProbeStream {
+    codec_name: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+fn ffprobe() -> Command {
+    let mut command = Command::new("ffprobe");
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    command
+}
+
+/// Checks for ffprobe. Returns false (without panicking) if it's unavailable,
 /// so the caller can disable duration-based matching gracefully.
 pub fn init() -> bool {
-    ffmpeg_next::init().is_ok()
+    ffprobe()
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 pub fn probe(path: &str, kind: MediaKind) -> Option<MediaInfo> {
-    let ictx = ffmpeg_next::format::input(&path).ok()?;
+    let stream = match kind {
+        MediaKind::Video => "v:0",
+        MediaKind::Audio => "a:0",
+    };
+    let output = ffprobe()
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            stream,
+            "-show_entries",
+            "format=duration:stream=codec_name,width,height",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    output.status.success().then_some(())?;
+    parse_probe(&output.stdout, kind)
+}
 
-    let duration = ictx.duration();
-    if duration <= 0 {
+fn parse_probe(json: &[u8], kind: MediaKind) -> Option<MediaInfo> {
+    let output: ProbeOutput = serde_json::from_slice(json).ok()?;
+    let duration_secs = output.format.duration.parse().ok()?;
+    if duration_secs <= 0.0 {
         return None;
     }
-    let duration_secs = duration as f64 / f64::from(ffmpeg_next::ffi::AV_TIME_BASE);
-
-    let mut width = None;
-    let mut height = None;
-    let mut codec = None;
-
-    if let Some(stream) = ictx.streams().best(ffmpeg_next::media::Type::Video) {
-        let params = stream.parameters();
-        if let Ok(ctx) = ffmpeg_next::codec::context::Context::from_parameters(params) {
-            codec = Some(ctx.id().name().to_string());
-            if let Ok(video) = ctx.decoder().video() {
-                width = Some(video.width());
-                height = Some(video.height());
-            }
-        }
-    } else if let Some(stream) = ictx.streams().best(ffmpeg_next::media::Type::Audio) {
-        let params = stream.parameters();
-        if let Ok(ctx) = ffmpeg_next::codec::context::Context::from_parameters(params) {
-            codec = Some(ctx.id().name().to_string());
-        }
-    }
-
+    let stream = output.streams.into_iter().next().unwrap_or_default();
     Some(MediaInfo {
         kind,
         duration_secs,
-        width,
-        height,
-        codec,
+        width: stream.width,
+        height: stream.height,
+        codec: stream.codec_name,
     })
 }
 
@@ -124,38 +162,22 @@ pub fn cluster_by_duration(
     audio.sort_by(|a, b| a.1.duration_secs.total_cmp(&b.1.duration_secs));
 
     let mut groups = Vec::new();
-    groups.extend(cluster_sorted(&video, tolerance_secs, "video"));
-    groups.extend(cluster_sorted(&audio, tolerance_secs, "audio"));
+    groups.extend(cluster_sorted(&video, tolerance_secs));
+    groups.extend(cluster_sorted(&audio, tolerance_secs));
 
     groups
 }
 
-fn cluster_sorted(
-    sorted: &[&(&FileEntry, MediaInfo)],
-    tolerance_secs: f64,
-    label: &str,
-) -> Vec<DuplicateGroup> {
+fn cluster_sorted(sorted: &[&(&FileEntry, MediaInfo)], tolerance_secs: f64) -> Vec<DuplicateGroup> {
     let mut groups = Vec::new();
     let mut cluster: Vec<&(&FileEntry, MediaInfo)> = Vec::new();
 
     let flush = |cluster: &mut Vec<&(&FileEntry, MediaInfo)>, groups: &mut Vec<DuplicateGroup>| {
         if cluster.len() > 1 {
-            let min_d = cluster
-                .iter()
-                .map(|(_, i)| i.duration_secs)
-                .fold(f64::MAX, f64::min);
-            let max_d = cluster
-                .iter()
-                .map(|(_, i)| i.duration_secs)
-                .fold(f64::MIN, f64::max);
             let max_size = cluster.iter().map(|(e, _)| e.size).max().unwrap_or(0);
             let total_size: u64 = cluster.iter().map(|(e, _)| e.size).sum();
 
             groups.push(DuplicateGroup {
-                id: format!("media-{}-{}", label, groups.len()),
-                match_kind: MatchKind::MediaDuration {
-                    spread_secs: max_d - min_d,
-                },
                 files: cluster
                     .iter()
                     .map(|(e, info)| DuplicateFile {
@@ -180,4 +202,22 @@ fn cluster_sorted(
     flush(&mut cluster, &mut groups);
 
     groups
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ffprobe_output() {
+        let info = parse_probe(
+            br#"{"streams":[{"codec_name":"h264","width":1920,"height":1080}],"format":{"duration":"12.5"}}"#,
+            MediaKind::Video,
+        )
+        .unwrap();
+
+        assert_eq!(info.duration_secs, 12.5);
+        assert_eq!((info.width, info.height), (Some(1920), Some(1080)));
+        assert_eq!(info.codec.as_deref(), Some("h264"));
+    }
 }

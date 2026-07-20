@@ -8,7 +8,7 @@ pub struct FileEntry {
     pub modified: Option<i64>,
 }
 
-#[derive(Serialize, Clone, PartialEq)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaKind {
     Video,
@@ -34,24 +34,13 @@ pub struct DuplicateFile {
 }
 
 #[derive(Serialize, Clone)]
-#[serde(tag = "kind")]
-pub enum MatchKind {
-    #[serde(rename = "exactHash")]
-    ExactHash { hash: String },
-    #[serde(rename = "mediaDuration", rename_all = "camelCase")]
-    MediaDuration { spread_secs: f64 },
-}
-
-#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DuplicateGroup {
-    pub id: String,
-    pub match_kind: MatchKind,
     pub files: Vec<DuplicateFile>,
     pub reclaimable_bytes: u64,
 }
 
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanSummary {
     pub files_scanned: u64,
@@ -63,7 +52,7 @@ pub struct ScanSummary {
     pub ffmpeg_available: bool,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanOptions {
     pub folders: Vec<String>,

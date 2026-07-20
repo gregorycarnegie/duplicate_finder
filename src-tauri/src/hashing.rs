@@ -1,9 +1,11 @@
-use crate::model::{DuplicateFile, DuplicateGroup, FileEntry, MatchKind, MediaInfo};
+use crate::model::{DuplicateFile, DuplicateGroup, FileEntry, MediaInfo};
 use rayon::prelude::*;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufReader, Read};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::{BufReader, Read},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 const CHUNK_SIZE: usize = 1024 * 1024;
 
@@ -62,11 +64,9 @@ pub fn find_exact_duplicates<F: Fn(u64, u64) + Sync>(
     by_hash
         .into_iter()
         .filter(|(_, files)| files.len() > 1)
-        .map(|((size, hash), files)| {
+        .map(|((size, _), files)| {
             let reclaimable_bytes = size * (files.len() as u64 - 1);
             DuplicateGroup {
-                id: format!("exact-{}", &hash[..12]),
-                match_kind: MatchKind::ExactHash { hash },
                 files: files
                     .iter()
                     .map(|e| DuplicateFile {
