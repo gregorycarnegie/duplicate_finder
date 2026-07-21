@@ -18,6 +18,7 @@ fn main() {
             commands::reveal_file,
             commands::scan,
             commands::trash_files,
+            commands::delete_files_permanently,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

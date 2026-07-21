@@ -114,7 +114,7 @@ Generated bundles are written below `src-tauri/target/release/bundle/`.
 4. Review exact duplicates and likely media matches separately.
 5. Select unwanted copies and choose **Move to trash**.
 
-Files are sent to the system trash rather than permanently deleted, but it is still worth checking paths and likely-duration matches carefully.
+Files are sent to the system trash rather than permanently deleted, but it is still worth checking paths and likely-duration matches carefully. Paths that don't support a trash/recycle bin (network shares, NAS mounts, some removable drives) will prompt for a permanent delete instead — that action cannot be undone.
 
 ## How matching works
 
@@ -137,4 +137,4 @@ If FFmpeg cannot initialize, exact duplicate scanning remains available and dura
 
 ## License
 
-No license has been specified yet.
+[MIT](LICENSE)

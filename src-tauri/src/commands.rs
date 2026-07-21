@@ -147,16 +147,57 @@ fn run_scan(app: AppHandle, options: ScanOptions) -> Result<ScanSummary, String>
     })
 }
 
+#[derive(serde::Serialize)]
+pub struct OpFailure {
+    path: String,
+    error: String,
+}
+
 /// Moves the given files to the operating system's trash/recycle bin
-/// (not a permanent delete) so the action is reversible.
+/// (not a permanent delete) so the action is reversible. Paths that don't
+/// support trashing (e.g. network shares/NAS mounts) are reported back as
+/// failures instead of aborting the whole batch.
 #[tauri::command]
-pub async fn trash_files(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
+pub async fn trash_files(app: AppHandle, paths: Vec<String>) -> Result<Vec<OpFailure>, String> {
     require_scanned(&app, &paths)?;
     tauri::async_runtime::spawn_blocking(move || {
-        trash::delete_all(&paths).map_err(|e| e.to_string())
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                trash::delete(&path).err().map(|e| OpFailure {
+                    path,
+                    error: e.to_string(),
+                })
+            })
+            .collect::<Vec<_>>()
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+/// Permanently deletes files, bypassing the trash. Intended as a fallback
+/// for paths where `trash_files` fails (no recycle bin support), so callers
+/// should only invoke this after the user has confirmed the operation is
+/// irreversible.
+#[tauri::command]
+pub async fn delete_files_permanently(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> Result<Vec<OpFailure>, String> {
+    require_scanned(&app, &paths)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                std::fs::remove_file(&path).err().map(|e| OpFailure {
+                    path,
+                    error: e.to_string(),
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

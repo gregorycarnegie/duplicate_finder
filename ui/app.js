@@ -405,6 +405,14 @@
     setScreen("setup");
   });
 
+  function removePathsFromGroups(removed) {
+    for (const group of [...state.summary.exactGroups, ...state.summary.mediaGroups]) {
+      group.files = group.files.filter((f) => !removed.has(f.path));
+    }
+    state.summary.exactGroups = state.summary.exactGroups.filter((g) => g.files.length > 1);
+    state.summary.mediaGroups = state.summary.mediaGroups.filter((g) => g.files.length > 1);
+  }
+
   btnTrash.addEventListener("click", async () => {
     const paths = [...state.selected];
     if (paths.length === 0) return;
@@ -414,15 +422,39 @@
     }
     btnTrash.disabled = true;
     try {
-      await invoke("trash_files", { paths });
-      const pathSet = new Set(paths);
-      for (const group of [...state.summary.exactGroups, ...state.summary.mediaGroups]) {
-        group.files = group.files.filter((f) => !pathSet.has(f.path));
+      const failures = await invoke("trash_files", { paths });
+      const failedPaths = new Set(failures.map((f) => f.path));
+      const trashed = new Set(paths.filter((p) => !failedPaths.has(p)));
+      removePathsFromGroups(trashed);
+      state.selected = new Set([...state.selected].filter((p) => failedPaths.has(p)));
+
+      if (trashed.size > 0) {
+        showToast(`Moved ${trashed.size} ${trashed.size === 1 ? "file" : "files"} to trash.`);
       }
-      state.summary.exactGroups = state.summary.exactGroups.filter((g) => g.files.length > 1);
-      state.summary.mediaGroups = state.summary.mediaGroups.filter((g) => g.files.length > 1);
-      state.selected = new Set();
-      showToast(`Moved ${paths.length} ${noun} to trash.`);
+
+      if (failures.length > 0) {
+        const failedNoun = failures.length === 1 ? "file" : "files";
+        const list = failures.map((f) => f.path).join("\n");
+        const permanent = confirm(
+          `${failures.length} ${failedNoun} could not be moved to the trash (no recycle bin support, ` +
+            `e.g. a network share or NAS):\n\n${list}\n\n` +
+            `Permanently delete ${failures.length === 1 ? "it" : "them"} instead? This cannot be undone.`,
+        );
+        if (permanent) {
+          const permFailures = await invoke("delete_files_permanently", { paths: [...failedPaths] });
+          const permFailedPaths = new Set(permFailures.map((f) => f.path));
+          const deleted = new Set([...failedPaths].filter((p) => !permFailedPaths.has(p)));
+          removePathsFromGroups(deleted);
+          state.selected = new Set([...state.selected].filter((p) => permFailedPaths.has(p)));
+          if (deleted.size > 0) {
+            showToast(`Permanently deleted ${deleted.size} ${deleted.size === 1 ? "file" : "files"}.`);
+          }
+          if (permFailures.length > 0) {
+            showToast(`Failed to delete ${permFailures.length} ${permFailures.length === 1 ? "file" : "files"}.`, true);
+          }
+        }
+      }
+
       renderResults();
     } catch (err) {
       showToast(String(err), true);
