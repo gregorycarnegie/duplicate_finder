@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0 - 2026-07-21
+
+### Added
+
+- Play button on video/audio duplicate rows, opening the file with the system's default player.
+
 ## 0.3.0 - 2026-07-21
 
 ### Added

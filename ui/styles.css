@@ -566,7 +566,7 @@ select {
 
 .dupe-file {
   display: grid;
-  grid-template-columns: 20px 1fr auto auto;
+  grid-template-columns: 20px 18px 1fr auto auto;
   gap: 14px;
   align-items: center;
   padding: 9px 14px;
@@ -580,6 +580,38 @@ select {
   accent-color: var(--exact);
   width: 14px;
   height: 14px;
+}
+
+.dupe-file__play {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--paper-faint);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dupe-file__play:hover {
+  color: var(--exact);
+  background: rgba(94, 234, 212, 0.12);
+}
+.dupe-file__play::before {
+  content: "";
+  width: 0;
+  height: 0;
+  margin-left: 2px;
+  border-style: solid;
+  border-width: 5px 0 5px 8px;
+  border-color: transparent transparent transparent currentColor;
+}
+.dupe-file__play--empty {
+  visibility: hidden;
+  cursor: default;
 }
 
 .dupe-file__path {

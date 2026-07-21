@@ -275,6 +275,22 @@
     });
     row.addEventListener("contextmenu", (event) => showFileMenu(event, file, checkbox));
 
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "dupe-file__play";
+    if (file.playable) {
+      play.title = "Play";
+      play.setAttribute("aria-label", `Play ${file.path}`);
+      play.addEventListener("click", (event) => {
+        event.preventDefault();
+        openFile(file);
+      });
+    } else {
+      play.className += " dupe-file__play--empty";
+      play.tabIndex = -1;
+      play.setAttribute("aria-hidden", "true");
+    }
+
     const path = document.createElement("span");
     path.className = "dupe-file__path";
     path.textContent = file.path;
@@ -289,7 +305,7 @@
     size.className = "dupe-file__size";
     size.textContent = file.sizeText;
 
-    row.append(checkbox, path, media, size);
+    row.append(checkbox, play, path, media, size);
     return row;
   }
 

@@ -119,6 +119,7 @@ pub struct FileView {
     pub size: u64,
     pub size_text: String,
     pub detail_text: String,
+    pub playable: bool,
 }
 
 #[derive(Serialize)]
@@ -150,6 +151,7 @@ fn present_file(file: &DuplicateFile) -> FileView {
             .as_ref()
             .map(media_badge)
             .unwrap_or_else(|| format_date(file.entry.modified)),
+        playable: file.media.is_some(),
     }
 }
 
