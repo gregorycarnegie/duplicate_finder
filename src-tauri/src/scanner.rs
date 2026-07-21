@@ -111,7 +111,7 @@ mod tests {
 
         let folder = root.to_string_lossy().to_string();
 
-        let visible_only = walk_folders(&[folder.clone()], false, 0, |_, _| {});
+        let visible_only = walk_folders(std::slice::from_ref(&folder), false, 0, |_, _| {});
         assert_eq!(names_of(&visible_only), vec!["visible.bin"]);
 
         let with_hidden = walk_folders(&[folder], true, 0, |_, _| {});

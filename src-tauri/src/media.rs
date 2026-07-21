@@ -50,9 +50,16 @@ struct ProbeStream {
 }
 
 fn ffprobe() -> Command {
-    let mut command = Command::new("ffprobe");
+    let command = Command::new("ffprobe");
+
     #[cfg(windows)]
-    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    {
+        let mut command = command;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        command
+    }
+
+    #[cfg(not(windows))]
     command
 }
 
