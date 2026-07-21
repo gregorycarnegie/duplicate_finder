@@ -223,4 +223,82 @@ mod tests {
         assert_eq!((info.width, info.height), (Some(1920), Some(1080)));
         assert_eq!(info.codec.as_deref(), Some("h264"));
     }
+
+    fn entry(path: &str, size: u64) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            size,
+            modified: None,
+        }
+    }
+
+    fn info(kind: MediaKind, duration_secs: f64) -> MediaInfo {
+        MediaInfo {
+            kind,
+            duration_secs,
+            width: None,
+            height: None,
+            codec: None,
+        }
+    }
+
+    #[test]
+    fn a_lone_file_forms_no_group() {
+        let entries = vec![entry("a.mp4", 100)];
+        let lookup = HashMap::from([("a.mp4".to_string(), info(MediaKind::Video, 10.0))]);
+
+        let groups = cluster_by_duration(&entries, &lookup, 1.0, &HashSet::new());
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn durations_right_at_the_tolerance_boundary_are_grouped() {
+        let entries = vec![entry("a.mp4", 100), entry("b.mp4", 200)];
+        let lookup = HashMap::from([
+            ("a.mp4".to_string(), info(MediaKind::Video, 10.0)),
+            ("b.mp4".to_string(), info(MediaKind::Video, 11.0)),
+        ]);
+
+        let groups = cluster_by_duration(&entries, &lookup, 1.0, &HashSet::new());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].files.len(), 2);
+        assert_eq!(groups[0].reclaimable_bytes, 100);
+    }
+
+    #[test]
+    fn durations_just_outside_the_tolerance_stay_separate() {
+        let entries = vec![entry("a.mp4", 100), entry("b.mp4", 200)];
+        let lookup = HashMap::from([
+            ("a.mp4".to_string(), info(MediaKind::Video, 10.0)),
+            ("b.mp4".to_string(), info(MediaKind::Video, 11.01)),
+        ]);
+
+        let groups = cluster_by_duration(&entries, &lookup, 1.0, &HashSet::new());
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn audio_and_video_with_matching_durations_are_not_mixed() {
+        let entries = vec![entry("a.mp4", 100), entry("b.mp3", 200)];
+        let lookup = HashMap::from([
+            ("a.mp4".to_string(), info(MediaKind::Video, 10.0)),
+            ("b.mp3".to_string(), info(MediaKind::Audio, 10.0)),
+        ]);
+
+        let groups = cluster_by_duration(&entries, &lookup, 1.0, &HashSet::new());
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn excluded_paths_are_skipped_even_if_durations_match() {
+        let entries = vec![entry("a.mp4", 100), entry("b.mp4", 200)];
+        let lookup = HashMap::from([
+            ("a.mp4".to_string(), info(MediaKind::Video, 10.0)),
+            ("b.mp4".to_string(), info(MediaKind::Video, 10.0)),
+        ]);
+        let exclude = HashSet::from(["a.mp4"]);
+
+        let groups = cluster_by_duration(&entries, &lookup, 1.0, &exclude);
+        assert!(groups.is_empty());
+    }
 }

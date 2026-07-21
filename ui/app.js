@@ -3,6 +3,7 @@
   const { listen } = window.__TAURI__.event;
   const { getCurrentWebview } = window.__TAURI__.webview;
   const { Menu, MenuItem } = window.__TAURI__.menu;
+  const { confirm } = window.__TAURI__.dialog;
 
   // ---------------------------------------------------------------
   // state
@@ -417,9 +418,11 @@
     const paths = [...state.selected];
     if (paths.length === 0) return;
     const noun = paths.length === 1 ? "file" : "files";
-    if (!confirm(`Move ${paths.length} ${noun} to the trash? This can be undone from your system trash.`)) {
-      return;
-    }
+    const confirmed = await confirm(
+      `Move ${paths.length} ${noun} to the trash? This can be undone from your system trash.`,
+      { title: "Move to trash", kind: "warning" },
+    );
+    if (!confirmed) return;
     btnTrash.disabled = true;
     try {
       const failures = await invoke("trash_files", { paths });
@@ -435,10 +438,11 @@
       if (failures.length > 0) {
         const failedNoun = failures.length === 1 ? "file" : "files";
         const list = failures.map((f) => f.path).join("\n");
-        const permanent = confirm(
+        const permanent = await confirm(
           `${failures.length} ${failedNoun} could not be moved to the trash (no recycle bin support, ` +
             `e.g. a network share or NAS):\n\n${list}\n\n` +
             `Permanently delete ${failures.length === 1 ? "it" : "them"} instead? This cannot be undone.`,
+          { title: "Permanently delete", kind: "warning" },
         );
         if (permanent) {
           const permFailures = await invoke("delete_files_permanently", { paths: [...failedPaths] });

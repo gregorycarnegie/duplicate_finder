@@ -56,3 +56,82 @@ pub fn walk_folders<F: FnMut(&str, u64)>(
 
     entries
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn names_of(entries: &[FileEntry]) -> Vec<String> {
+        let mut names: Vec<String> = entries
+            .iter()
+            .map(|e| {
+                std::path::Path::new(&e.path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn setup(name: &str) -> std::path::PathBuf {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(name);
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn filters_files_below_min_size() {
+        let root = setup("scanner-test-min-size");
+        fs::write(root.join("small.bin"), vec![0u8; 10]).unwrap();
+        fs::write(root.join("big.bin"), vec![0u8; 100]).unwrap();
+
+        let folder = root.to_string_lossy().to_string();
+        let entries = walk_folders(&[folder], true, 50, |_, _| {});
+
+        assert_eq!(names_of(&entries), vec!["big.bin"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hidden_files_and_folders_are_excluded_by_default() {
+        let root = setup("scanner-test-hidden");
+        fs::write(root.join("visible.bin"), vec![0u8; 10]).unwrap();
+        fs::write(root.join(".hidden.bin"), vec![0u8; 10]).unwrap();
+        fs::create_dir(root.join(".hidden-dir")).unwrap();
+        fs::write(root.join(".hidden-dir").join("inner.bin"), vec![0u8; 10]).unwrap();
+
+        let folder = root.to_string_lossy().to_string();
+
+        let visible_only = walk_folders(&[folder.clone()], false, 0, |_, _| {});
+        assert_eq!(names_of(&visible_only), vec!["visible.bin"]);
+
+        let with_hidden = walk_folders(&[folder], true, 0, |_, _| {});
+        assert_eq!(
+            names_of(&with_hidden),
+            vec![".hidden.bin", "inner.bin", "visible.bin"]
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_dotted_top_level_scan_root_is_still_walked() {
+        let root = setup(".scanner-test-dotted-root");
+        fs::write(root.join("file.bin"), vec![0u8; 10]).unwrap();
+
+        let folder = root.to_string_lossy().to_string();
+        let entries = walk_folders(&[folder], false, 0, |_, _| {});
+
+        assert_eq!(names_of(&entries), vec!["file.bin"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
