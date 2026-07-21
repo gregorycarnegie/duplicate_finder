@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-21
+
 ### Added
 
 - Drag-and-drop folder selection.
@@ -12,6 +14,8 @@
 
 - Replaced compile-time FFmpeg linking with optional runtime `ffprobe` detection for Windows compatibility.
 - Simplified the desktop crate layout and duplicate-group response data.
+- Reduced exact duplicate I/O with sampled prefiltering before full verification.
+- Removed avoidable media/path cloning and made selection totals linear-time.
 - Updated platform setup instructions.
 
 ### Security

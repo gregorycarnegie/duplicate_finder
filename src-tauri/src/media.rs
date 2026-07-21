@@ -141,16 +141,16 @@ pub fn cluster_by_duration(
     entries: &[FileEntry],
     media_lookup: &HashMap<String, MediaInfo>,
     tolerance_secs: f64,
-    exclude: &HashSet<String>,
+    exclude: &HashSet<&str>,
 ) -> Vec<DuplicateGroup> {
-    let probed: Vec<(&FileEntry, MediaInfo)> = entries
+    let probed: Vec<(&FileEntry, &MediaInfo)> = entries
         .iter()
-        .filter(|e| !exclude.contains(&e.path))
-        .filter_map(|e| media_lookup.get(&e.path).map(|info| (e, info.clone())))
+        .filter(|e| !exclude.contains(e.path.as_str()))
+        .filter_map(|e| media_lookup.get(&e.path).map(|info| (e, info)))
         .collect();
 
-    let mut video: Vec<&(&FileEntry, MediaInfo)> = Vec::new();
-    let mut audio: Vec<&(&FileEntry, MediaInfo)> = Vec::new();
+    let mut video: Vec<&(&FileEntry, &MediaInfo)> = Vec::new();
+    let mut audio: Vec<&(&FileEntry, &MediaInfo)> = Vec::new();
     for item in &probed {
         match item.1.kind {
             MediaKind::Video => video.push(item),
@@ -168,11 +168,14 @@ pub fn cluster_by_duration(
     groups
 }
 
-fn cluster_sorted(sorted: &[&(&FileEntry, MediaInfo)], tolerance_secs: f64) -> Vec<DuplicateGroup> {
+fn cluster_sorted(
+    sorted: &[&(&FileEntry, &MediaInfo)],
+    tolerance_secs: f64,
+) -> Vec<DuplicateGroup> {
     let mut groups = Vec::new();
-    let mut cluster: Vec<&(&FileEntry, MediaInfo)> = Vec::new();
+    let mut cluster: Vec<&(&FileEntry, &MediaInfo)> = Vec::new();
 
-    let flush = |cluster: &mut Vec<&(&FileEntry, MediaInfo)>, groups: &mut Vec<DuplicateGroup>| {
+    let flush = |cluster: &mut Vec<&(&FileEntry, &MediaInfo)>, groups: &mut Vec<DuplicateGroup>| {
         if cluster.len() > 1 {
             let max_size = cluster.iter().map(|(e, _)| e.size).max().unwrap_or(0);
             let total_size: u64 = cluster.iter().map(|(e, _)| e.size).sum();
@@ -182,7 +185,7 @@ fn cluster_sorted(sorted: &[&(&FileEntry, MediaInfo)], tolerance_secs: f64) -> V
                     .iter()
                     .map(|(e, info)| DuplicateFile {
                         entry: (*e).clone(),
-                        media: Some(info.clone()),
+                        media: Some((*info).clone()),
                     })
                     .collect(),
                 reclaimable_bytes: total_size.saturating_sub(max_size),

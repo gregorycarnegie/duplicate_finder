@@ -1,6 +1,6 @@
 # Duplicate Finder
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
 [![Rust 2024](https://img.shields.io/badge/Rust-2024-orange?logo=rust)](https://www.rust-lang.org/)
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![BLAKE3](https://img.shields.io/badge/hashing-BLAKE3-5E4AE3)](https://github.com/BLAKE3-team/BLAKE3)

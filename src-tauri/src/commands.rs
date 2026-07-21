@@ -111,9 +111,9 @@ fn run_scan(app: AppHandle, options: ScanOptions) -> Result<ScanSummary, String>
             let _ = app.emit("scan-progress", ScanProgress::Hashing { done, total });
         });
 
-    let exact_paths: HashSet<String> = exact_groups
+    let exact_paths: HashSet<&str> = exact_groups
         .iter()
-        .flat_map(|g| g.files.iter().map(|f| f.entry.path.clone()))
+        .flat_map(|g| g.files.iter().map(|f| f.entry.path.as_str()))
         .collect();
 
     let media_groups = if ffmpeg_available {

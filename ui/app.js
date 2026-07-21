@@ -386,14 +386,13 @@
     ledger.hidden = count === 0;
     if (count === 0) return;
 
-    let bytes = 0;
     const allFiles = [...state.summary.exactGroups, ...state.summary.mediaGroups].flatMap(
       (g) => g.files,
     );
-    for (const path of state.selected) {
-      const f = allFiles.find((f) => f.path === path);
-      if (f) bytes += f.size;
-    }
+    const bytes = allFiles.reduce(
+      (total, file) => total + (state.selected.has(file.path) ? file.size : 0),
+      0,
+    );
 
     ledgerCount.textContent = `${count} selected`;
     ledgerSize.textContent = formatBytes(bytes);

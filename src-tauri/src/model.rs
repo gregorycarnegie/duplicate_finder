@@ -8,7 +8,7 @@ pub struct FileEntry {
     pub modified: Option<i64>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaKind {
     Video,
