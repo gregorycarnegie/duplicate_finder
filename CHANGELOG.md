@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-07-21
 
 ### Added
 
@@ -11,11 +11,13 @@
 
 - `trash_files` now reports per-file failures instead of aborting the whole batch on the first untrashable path.
 - Trash/permanent-delete confirmations use the native dialog plugin instead of the browser's `confirm()`.
+- Moved result formatting (sizes, durations, dates, group headers) and post-trash group recomputation from the frontend into the Rust backend; the webview now just renders precomputed fields.
 
 ### Tests
 
 - Added scanner coverage for minimum file size and hidden file/folder filtering.
 - Added duration-clustering coverage for tolerance boundaries, lone files, mixed audio/video, and excluded (already-exact-duplicate) paths.
+- Added coverage for the new formatting helpers and post-removal group recomputation.
 
 ## 0.2.0 - 2026-07-21
 

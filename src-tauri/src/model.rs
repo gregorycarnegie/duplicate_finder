@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -67,4 +68,91 @@ pub enum ScanProgress {
     Walking { folder: String, files_found: u64 },
     Hashing { done: u64, total: u64 },
     Probing { done: u64, total: u64 },
+}
+
+fn recompute_group(group: &mut DuplicateGroup) {
+    let total: u64 = group.files.iter().map(|f| f.entry.size).sum();
+    let max = group.files.iter().map(|f| f.entry.size).max().unwrap_or(0);
+    group.reclaimable_bytes = total.saturating_sub(max);
+}
+
+/// Drops the given paths from every group (used after a trash/delete
+/// operation), removing groups that no longer have a duplicate partner and
+/// recomputing reclaimable byte counts to match.
+pub fn remove_paths(summary: &mut ScanSummary, removed: &HashSet<String>) {
+    for group in summary
+        .exact_groups
+        .iter_mut()
+        .chain(summary.media_groups.iter_mut())
+    {
+        group.files.retain(|f| !removed.contains(&f.entry.path));
+        recompute_group(group);
+    }
+    summary.exact_groups.retain(|g| g.files.len() > 1);
+    summary.media_groups.retain(|g| g.files.len() > 1);
+    summary.reclaimable_bytes = summary
+        .exact_groups
+        .iter()
+        .chain(summary.media_groups.iter())
+        .map(|g| g.reclaimable_bytes)
+        .sum();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str, size: u64) -> DuplicateFile {
+        DuplicateFile {
+            entry: FileEntry {
+                path: path.to_string(),
+                size,
+                modified: None,
+            },
+            media: None,
+        }
+    }
+
+    #[test]
+    fn removing_a_path_shrinks_the_group_and_reclaimable_total() {
+        let mut summary = ScanSummary {
+            files_scanned: 3,
+            bytes_scanned: 300,
+            exact_groups: vec![DuplicateGroup {
+                files: vec![file("a", 100), file("b", 100), file("c", 100)],
+                reclaimable_bytes: 200,
+            }],
+            media_groups: vec![],
+            reclaimable_bytes: 200,
+            elapsed_ms: 0,
+            ffmpeg_available: false,
+        };
+
+        remove_paths(&mut summary, &HashSet::from(["b".to_string()]));
+
+        assert_eq!(summary.exact_groups[0].files.len(), 2);
+        assert_eq!(summary.exact_groups[0].reclaimable_bytes, 100);
+        assert_eq!(summary.reclaimable_bytes, 100);
+    }
+
+    #[test]
+    fn removing_down_to_one_file_drops_the_whole_group() {
+        let mut summary = ScanSummary {
+            files_scanned: 2,
+            bytes_scanned: 200,
+            exact_groups: vec![DuplicateGroup {
+                files: vec![file("a", 100), file("b", 100)],
+                reclaimable_bytes: 100,
+            }],
+            media_groups: vec![],
+            reclaimable_bytes: 100,
+            elapsed_ms: 0,
+            ffmpeg_available: false,
+        };
+
+        remove_paths(&mut summary, &HashSet::from(["b".to_string()]));
+
+        assert!(summary.exact_groups.is_empty());
+        assert_eq!(summary.reclaimable_bytes, 0);
+    }
 }

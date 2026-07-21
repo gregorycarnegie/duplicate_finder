@@ -1,12 +1,14 @@
 use crate::{
     hashing, media,
-    model::{DuplicateGroup, ScanOptions, ScanProgress, ScanSummary},
+    model::{self, DuplicateGroup, ScanOptions, ScanProgress, ScanSummary},
+    present::{self, ScanSummaryView},
     scanner,
 };
 use std::{collections::HashSet, sync::Mutex, time::Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 pub type ScannedFiles = Mutex<HashSet<String>>;
+pub type LastSummary = Mutex<Option<ScanSummary>>;
 
 fn all_scanned(scanned: &HashSet<String>, paths: &[String]) -> bool {
     paths.iter().all(|path| scanned.contains(path))
@@ -59,10 +61,16 @@ pub fn reveal_file(app: AppHandle, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn scan(app: AppHandle, options: ScanOptions) -> Result<ScanSummary, String> {
-    tauri::async_runtime::spawn_blocking(move || run_scan(app, options))
+pub async fn scan(app: AppHandle, options: ScanOptions) -> Result<ScanSummaryView, String> {
+    let scan_app = app.clone();
+    let summary = tauri::async_runtime::spawn_blocking(move || run_scan(scan_app, options))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+
+    let view = present::present_summary(&summary);
+    let last = app.state::<LastSummary>();
+    *last.lock().map_err(|e| e.to_string())? = Some(summary);
+    Ok(view)
 }
 
 fn run_scan(app: AppHandle, options: ScanOptions) -> Result<ScanSummary, String> {
@@ -153,15 +161,50 @@ pub struct OpFailure {
     error: String,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashResult {
+    summary: ScanSummaryView,
+    failures: Vec<OpFailure>,
+}
+
+/// Removes the successfully-processed paths from the last scan's groups and
+/// returns the updated, display-ready summary alongside any failures.
+fn apply_removal(
+    app: &AppHandle,
+    paths: &[String],
+    failures: Vec<OpFailure>,
+) -> Result<TrashResult, String> {
+    let failed: HashSet<&str> = failures.iter().map(|f| f.path.as_str()).collect();
+    let removed: HashSet<String> = paths
+        .iter()
+        .filter(|p| !failed.contains(p.as_str()))
+        .cloned()
+        .collect();
+
+    let last = app.state::<LastSummary>();
+    let mut last = last.lock().map_err(|e| e.to_string())?;
+    let summary = last
+        .as_mut()
+        .ok_or_else(|| "No scan in progress.".to_string())?;
+    model::remove_paths(summary, &removed);
+
+    Ok(TrashResult {
+        summary: present::present_summary(summary),
+        failures,
+    })
+}
+
 /// Moves the given files to the operating system's trash/recycle bin
 /// (not a permanent delete) so the action is reversible. Paths that don't
 /// support trashing (e.g. network shares/NAS mounts) are reported back as
 /// failures instead of aborting the whole batch.
 #[tauri::command]
-pub async fn trash_files(app: AppHandle, paths: Vec<String>) -> Result<Vec<OpFailure>, String> {
+pub async fn trash_files(app: AppHandle, paths: Vec<String>) -> Result<TrashResult, String> {
     require_scanned(&app, &paths)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        paths
+    let move_paths = paths.clone();
+    let failures = tauri::async_runtime::spawn_blocking(move || {
+        move_paths
             .into_iter()
             .filter_map(|path| {
                 trash::delete(&path).err().map(|e| OpFailure {
@@ -172,7 +215,9 @@ pub async fn trash_files(app: AppHandle, paths: Vec<String>) -> Result<Vec<OpFai
             .collect::<Vec<_>>()
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    apply_removal(&app, &paths, failures)
 }
 
 /// Permanently deletes files, bypassing the trash. Intended as a fallback
@@ -183,10 +228,11 @@ pub async fn trash_files(app: AppHandle, paths: Vec<String>) -> Result<Vec<OpFai
 pub async fn delete_files_permanently(
     app: AppHandle,
     paths: Vec<String>,
-) -> Result<Vec<OpFailure>, String> {
+) -> Result<TrashResult, String> {
     require_scanned(&app, &paths)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        paths
+    let delete_paths = paths.clone();
+    let failures = tauri::async_runtime::spawn_blocking(move || {
+        delete_paths
             .into_iter()
             .filter_map(|path| {
                 std::fs::remove_file(&path).err().map(|e| OpFailure {
@@ -197,7 +243,9 @@ pub async fn delete_files_permanently(
             .collect::<Vec<_>>()
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    apply_removal(&app, &paths, failures)
 }
 
 #[cfg(test)]

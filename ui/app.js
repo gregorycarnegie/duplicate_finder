@@ -18,6 +18,10 @@
   // ---------------------------------------------------------------
   // formatting helpers
   // ---------------------------------------------------------------
+  // Everything derived from scan results (sizes, durations, dates, group
+  // headers) is pre-formatted by the Rust backend. This one survives
+  // client-side because it summarizes ephemeral selection state that only
+  // ever exists in the webview.
 
   function formatBytes(n) {
     if (!n || n <= 0) return "0 B";
@@ -30,36 +34,6 @@
     }
     const decimals = i === 0 ? 0 : v < 10 ? 1 : 0;
     return `${v.toFixed(decimals)} ${units[i]}`;
-  }
-
-  function formatDuration(secs) {
-    if (secs == null) return "";
-    const totalMs = Math.round(secs * 1000);
-    const ms = totalMs % 1000;
-    const totalSec = Math.floor(totalMs / 1000);
-    const s = totalSec % 60;
-    const totalMin = Math.floor(totalSec / 60);
-    const m = totalMin % 60;
-    const h = Math.floor(totalMin / 60);
-    const pad = (n) => String(n).padStart(2, "0");
-    const msStr = String(ms).padStart(3, "0");
-    return h > 0 ? `${h}:${pad(m)}:${pad(s)}.${msStr}` : `${m}:${pad(s)}.${msStr}`;
-  }
-
-  function formatDate(unixSecs) {
-    if (unixSecs == null) return "";
-    const d = new Date(unixSecs * 1000);
-    const now = new Date();
-    const opts =
-      d.getFullYear() === now.getFullYear()
-        ? { month: "short", day: "numeric" }
-        : { month: "short", day: "numeric", year: "numeric" };
-    return d.toLocaleDateString(undefined, opts);
-  }
-
-  function formatMs(ms) {
-    if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(1)}s`;
   }
 
   // ---------------------------------------------------------------
@@ -287,12 +261,6 @@
     }
   }
 
-  function mediaBadge(media) {
-    const dims = media.width && media.height ? `${media.width}×${media.height} ` : "";
-    const codec = media.codec ? `${media.codec.toUpperCase()} ` : "";
-    return `${dims}${codec}${formatDuration(media.durationSecs)}`;
-  }
-
   function renderFileRow(file) {
     const row = document.createElement("label");
     row.className = "dupe-file";
@@ -315,11 +283,11 @@
 
     const media = document.createElement("span");
     media.className = "dupe-file__media";
-    media.textContent = file.media ? mediaBadge(file.media) : formatDate(file.modified);
+    media.textContent = file.detailText;
 
     const size = document.createElement("span");
     size.className = "dupe-file__size";
-    size.textContent = formatBytes(file.size);
+    size.textContent = file.sizeText;
 
     row.append(checkbox, path, media, size);
     return row;
@@ -333,17 +301,11 @@
     header.className = "dupe-group__header";
 
     const left = document.createElement("span");
-    if (kind === "exact") {
-      left.textContent = `${group.files.length} files · ${formatBytes(group.files[0].size)} each`;
-    } else {
-      const durations = group.files.map((file) => file.media.durationSecs);
-      const spread = Math.max(...durations) - Math.min(...durations);
-      left.textContent = `${group.files.length} files · duration spread ${spread.toFixed(2)}s`;
-    }
+    left.textContent = group.headerLeft;
 
     const right = document.createElement("span");
     right.className = "dupe-group__reclaim";
-    right.textContent = `${formatBytes(group.reclaimableBytes)} reclaimable`;
+    right.textContent = group.headerRight;
 
     header.append(left, right);
     card.append(header);
@@ -357,9 +319,9 @@
 
   function renderResults() {
     const s = state.summary;
-    summaryFiles.textContent = `${s.filesScanned.toLocaleString()} files scanned`;
-    summaryReclaim.textContent = `${formatBytes(s.reclaimableBytes)} reclaimable`;
-    summaryTime.textContent = `finished in ${formatMs(s.elapsedMs)}`;
+    summaryFiles.textContent = s.filesScannedText;
+    summaryReclaim.textContent = s.reclaimableText;
+    summaryTime.textContent = s.elapsedText;
     ffmpegNote.hidden = s.ffmpegAvailable;
 
     exactGroupsEl.innerHTML = "";
@@ -406,14 +368,6 @@
     setScreen("setup");
   });
 
-  function removePathsFromGroups(removed) {
-    for (const group of [...state.summary.exactGroups, ...state.summary.mediaGroups]) {
-      group.files = group.files.filter((f) => !removed.has(f.path));
-    }
-    state.summary.exactGroups = state.summary.exactGroups.filter((g) => g.files.length > 1);
-    state.summary.mediaGroups = state.summary.mediaGroups.filter((g) => g.files.length > 1);
-  }
-
   btnTrash.addEventListener("click", async () => {
     const paths = [...state.selected];
     if (paths.length === 0) return;
@@ -425,14 +379,14 @@
     if (!confirmed) return;
     btnTrash.disabled = true;
     try {
-      const failures = await invoke("trash_files", { paths });
+      const { summary, failures } = await invoke("trash_files", { paths });
+      state.summary = summary;
       const failedPaths = new Set(failures.map((f) => f.path));
-      const trashed = new Set(paths.filter((p) => !failedPaths.has(p)));
-      removePathsFromGroups(trashed);
-      state.selected = new Set([...state.selected].filter((p) => failedPaths.has(p)));
+      const trashedCount = paths.length - failedPaths.size;
+      state.selected = new Set(paths.filter((p) => failedPaths.has(p)));
 
-      if (trashed.size > 0) {
-        showToast(`Moved ${trashed.size} ${trashed.size === 1 ? "file" : "files"} to trash.`);
+      if (trashedCount > 0) {
+        showToast(`Moved ${trashedCount} ${trashedCount === 1 ? "file" : "files"} to trash.`);
       }
 
       if (failures.length > 0) {
@@ -445,16 +399,16 @@
           { title: "Permanently delete", kind: "warning" },
         );
         if (permanent) {
-          const permFailures = await invoke("delete_files_permanently", { paths: [...failedPaths] });
-          const permFailedPaths = new Set(permFailures.map((f) => f.path));
-          const deleted = new Set([...failedPaths].filter((p) => !permFailedPaths.has(p)));
-          removePathsFromGroups(deleted);
+          const permResult = await invoke("delete_files_permanently", { paths: [...failedPaths] });
+          state.summary = permResult.summary;
+          const permFailedPaths = new Set(permResult.failures.map((f) => f.path));
+          const deletedCount = failedPaths.size - permFailedPaths.size;
           state.selected = new Set([...state.selected].filter((p) => permFailedPaths.has(p)));
-          if (deleted.size > 0) {
-            showToast(`Permanently deleted ${deleted.size} ${deleted.size === 1 ? "file" : "files"}.`);
+          if (deletedCount > 0) {
+            showToast(`Permanently deleted ${deletedCount} ${deletedCount === 1 ? "file" : "files"}.`);
           }
-          if (permFailures.length > 0) {
-            showToast(`Failed to delete ${permFailures.length} ${permFailures.length === 1 ? "file" : "files"}.`, true);
+          if (permResult.failures.length > 0) {
+            showToast(`Failed to delete ${permResult.failures.length} ${permResult.failures.length === 1 ? "file" : "files"}.`, true);
           }
         }
       }
