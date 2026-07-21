@@ -8,10 +8,21 @@
 </head>
 <body data-screen="setup">
 
-  <header class="titlebar">
-    <div class="wordmark">
+  <header class="titlebar" data-tauri-drag-region>
+    <div class="wordmark" data-tauri-drag-region>
       <span class="wordmark__mark" aria-hidden="true"></span>
       DUPLICATE&nbsp;FINDER
+    </div>
+    <div class="titlebar__controls">
+      <button class="titlebar__btn" id="btn-minimize" type="button" aria-label="Minimize">
+        <span class="titlebar__icon titlebar__icon--minimize"></span>
+      </button>
+      <button class="titlebar__btn" id="btn-maximize" type="button" aria-label="Maximize">
+        <span class="titlebar__icon titlebar__icon--maximize"></span>
+      </button>
+      <button class="titlebar__btn titlebar__btn--close" id="btn-close" type="button" aria-label="Close">
+        <span class="titlebar__icon titlebar__icon--close"></span>
+      </button>
     </div>
   </header>
 

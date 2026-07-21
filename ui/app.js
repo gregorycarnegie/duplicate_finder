@@ -2,6 +2,7 @@
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
   const { getCurrentWebview } = window.__TAURI__.webview;
+  const { getCurrentWindow } = window.__TAURI__.window;
   const { Menu, MenuItem } = window.__TAURI__.menu;
   const { confirm } = window.__TAURI__.dialog;
 
@@ -14,6 +15,24 @@
     summary: null,
     selected: new Set(),
   };
+
+  // ---------------------------------------------------------------
+  // titlebar
+  // ---------------------------------------------------------------
+
+  const appWindow = getCurrentWindow();
+  const btnMaximize = document.getElementById("btn-maximize");
+
+  async function syncMaximizedState() {
+    btnMaximize.classList.toggle("is-maximized", await appWindow.isMaximized());
+  }
+
+  document.getElementById("btn-minimize").addEventListener("click", () => appWindow.minimize());
+  btnMaximize.addEventListener("click", () => appWindow.toggleMaximize());
+  document.getElementById("btn-close").addEventListener("click", () => appWindow.close());
+
+  syncMaximizedState();
+  appWindow.onResized(syncMaximizedState);
 
   // ---------------------------------------------------------------
   // formatting helpers

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0 - 2026-07-21
+
+### Added
+
+- Borderless window with a custom titlebar (minimize, maximize/restore, close, drag-to-move, double-click-to-maximize).
+
 ## 0.4.0 - 2026-07-21
 
 ### Added

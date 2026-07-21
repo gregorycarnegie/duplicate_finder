@@ -74,9 +74,11 @@ button {
 .titlebar {
   flex: none;
   display: flex;
-  align-items: center;
-  padding: 14px 28px;
+  align-items: stretch;
+  justify-content: space-between;
+  padding-left: 28px;
   border-bottom: 1px solid var(--hairline);
+  user-select: none;
 }
 
 .wordmark {
@@ -88,6 +90,7 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 14px 0;
 }
 
 .wordmark__mark {
@@ -107,6 +110,87 @@ button {
   background: var(--exact);
   left: 4px;
   top: -4px;
+}
+
+.titlebar__controls {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+}
+
+.titlebar__btn {
+  flex: none;
+  width: 46px;
+  border: none;
+  background: none;
+  color: var(--paper-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 100ms ease, color 100ms ease;
+}
+.titlebar__btn:hover {
+  background: var(--panel-raised);
+  color: var(--paper);
+}
+.titlebar__btn--close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.titlebar__icon {
+  position: relative;
+  width: 10px;
+  height: 10px;
+}
+
+.titlebar__icon--minimize::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: currentColor;
+}
+
+.titlebar__icon--maximize {
+  border: 1px solid currentColor;
+  box-sizing: border-box;
+}
+.titlebar__btn--maximize.is-maximized .titlebar__icon--maximize {
+  width: 8px;
+  height: 8px;
+  margin: 2px 0 0 2px;
+}
+.titlebar__btn--maximize.is-maximized .titlebar__icon--maximize::before {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: -3px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  background: var(--panel);
+  box-sizing: border-box;
+}
+
+.titlebar__icon--close::before,
+.titlebar__icon--close::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 1px;
+  background: currentColor;
+}
+.titlebar__icon--close::before {
+  transform: rotate(45deg);
+}
+.titlebar__icon--close::after {
+  transform: rotate(-45deg);
 }
 
 /* ---------------- layout ---------------- */
