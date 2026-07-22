@@ -217,6 +217,7 @@ fn cluster_sorted(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn parses_ffprobe_output() {
@@ -307,5 +308,49 @@ mod tests {
 
         let groups = cluster_by_duration(&entries, &lookup, 1.0, &exclude);
         assert!(groups.is_empty());
+    }
+
+    proptest! {
+        #[test]
+        fn clusters_stay_within_tolerance_and_never_reuse_a_file(
+            durations in prop::collection::vec(0.0f64..1000.0, 0..12),
+            tolerance in 0.0f64..5.0,
+        ) {
+            let entries: Vec<FileEntry> = durations
+                .iter()
+                .enumerate()
+                .map(|(i, _)| entry(&format!("f{i}.mp4"), (i as u64 + 1) * 100))
+                .collect();
+            let lookup: HashMap<String, MediaInfo> = entries
+                .iter()
+                .zip(&durations)
+                .map(|(e, &d)| (e.path.clone(), info(MediaKind::Video, d)))
+                .collect();
+
+            let groups = cluster_by_duration(&entries, &lookup, tolerance, &HashSet::new());
+
+            let mut seen = HashSet::new();
+            for group in &groups {
+                prop_assert!(group.files.len() > 1);
+
+                let mut group_durations: Vec<f64> = group
+                    .files
+                    .iter()
+                    .map(|f| lookup[&f.entry.path].duration_secs)
+                    .collect();
+                group_durations.sort_by(f64::total_cmp);
+                for pair in group_durations.windows(2) {
+                    prop_assert!(pair[1] - pair[0] <= tolerance + 1e-9);
+                }
+
+                let total: u64 = group.files.iter().map(|f| f.entry.size).sum();
+                let max = group.files.iter().map(|f| f.entry.size).max().unwrap();
+                prop_assert_eq!(group.reclaimable_bytes, total - max);
+
+                for f in &group.files {
+                    prop_assert!(seen.insert(f.entry.path.clone()), "path grouped twice");
+                }
+            }
+        }
     }
 }

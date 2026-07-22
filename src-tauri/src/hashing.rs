@@ -127,6 +127,7 @@ pub fn find_exact_duplicates<F: Fn(u64, u64) + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::{fs, hint::black_box, io::Write, path::PathBuf, time::Instant};
 
     fn entries_in(root: &PathBuf) -> Vec<FileEntry> {
@@ -189,6 +190,37 @@ mod tests {
         assert_eq!(groups[0].files.len(), 2);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20))]
+        #[test]
+        fn groups_match_content_equality_classes(ids in prop::collection::vec(0u8..4, 2..8)) {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/hash-proptest");
+            if root.exists() {
+                fs::remove_dir_all(&root).unwrap();
+            }
+            fs::create_dir_all(&root).unwrap();
+
+            for (i, &id) in ids.iter().enumerate() {
+                fs::write(root.join(format!("{i}.bin")), vec![id; 64]).unwrap();
+            }
+
+            let groups = find_exact_duplicates(&entries_in(&root), &HashMap::new(), |_, _| {});
+
+            let mut counts: HashMap<u8, usize> = HashMap::new();
+            for &id in &ids {
+                *counts.entry(id).or_default() += 1;
+            }
+            let expected_groups = counts.values().filter(|&&c| c > 1).count();
+
+            prop_assert_eq!(groups.len(), expected_groups);
+            for group in &groups {
+                prop_assert!(group.files.len() > 1);
+            }
+
+            fs::remove_dir_all(&root).unwrap();
+        }
     }
 
     #[test]
