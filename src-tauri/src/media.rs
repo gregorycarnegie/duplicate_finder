@@ -1,10 +1,16 @@
 use crate::model::{DuplicateFile, DuplicateGroup, FileEntry, MediaInfo, MediaKind};
+use crate::scan_control::ScanControl;
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+};
+use std::{
+    io::{self, Read},
+    thread,
+    time::{Duration, Instant},
 };
 
 #[cfg(windows)]
@@ -65,42 +71,88 @@ fn ffprobe() -> Command {
 
 /// Checks for ffprobe. Returns false (without panicking) if it's unavailable,
 /// so the caller can disable duration-based matching gracefully.
-pub fn init() -> bool {
-    ffprobe()
-        .arg("-version")
-        .stdout(Stdio::null())
+// Read bounded output concurrently so a full pipe cannot stall the child.
+fn run_command(
+    command: &mut Command,
+    control: &ScanControl,
+    timeout: Duration,
+) -> io::Result<Vec<u8>> {
+    control.check()?;
+    let mut child = command
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .spawn()?;
+    let stdout = child.stdout.take().unwrap();
+    let reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut output)
+            .map(|_| output)
+    });
+    let start = Instant::now();
+    let status = loop {
+        if let Err(error) = control.check() {
+            break Err(error);
+        }
+        if start.elapsed() >= timeout {
+            break Err(io::Error::new(io::ErrorKind::TimedOut, "ffprobe timed out"));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(error) => break Err(error),
+        }
+    };
+    if status.is_err() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    let output = reader
+        .join()
+        .map_err(|_| io::Error::other("Cannot read ffprobe output"))??;
+    if !status?.success() {
+        return Err(io::Error::other("ffprobe could not read this media file"));
+    }
+    if output.len() > 1024 * 1024 {
+        return Err(io::Error::other("ffprobe output exceeded limit"));
+    }
+    Ok(output)
 }
 
-pub fn probe(path: &str, kind: MediaKind) -> Option<MediaInfo> {
+pub fn init(control: &ScanControl) -> bool {
+    run_command(ffprobe().arg("-version"), control, Duration::from_secs(5)).is_ok()
+}
+
+pub fn probe(path: &str, kind: MediaKind, control: &ScanControl) -> io::Result<MediaInfo> {
     let stream = match kind {
         MediaKind::Video => "v:0",
         MediaKind::Audio => "a:0",
     };
-    let output = ffprobe()
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            stream,
-            "-show_entries",
-            "format=duration:stream=codec_name,width,height",
-            "-of",
-            "json",
-        ])
-        .arg(path)
-        .output()
-        .ok()?;
-    output.status.success().then_some(())?;
-    parse_probe(&output.stdout, kind)
+    let output = run_command(
+        ffprobe()
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                stream,
+                "-show_entries",
+                "format=duration:stream=codec_name,width,height",
+                "-of",
+                "json",
+            ])
+            .arg(path),
+        control,
+        Duration::from_secs(30),
+    )?;
+    parse_probe(&output, kind)
+        .ok_or_else(|| io::Error::other("Media duration is missing or invalid"))
 }
 
 fn parse_probe(json: &[u8], kind: MediaKind) -> Option<MediaInfo> {
     let output: ProbeOutput = serde_json::from_slice(json).ok()?;
-    let duration_secs = output.format.duration.parse().ok()?;
-    if duration_secs <= 0.0 {
+    let duration_secs: f64 = output.format.duration.parse().ok()?;
+    if !duration_secs.is_finite() || duration_secs <= 0.0 {
         return None;
     }
     let stream = output.streams.into_iter().next().unwrap_or_default();
@@ -114,11 +166,11 @@ fn parse_probe(json: &[u8], kind: MediaKind) -> Option<MediaInfo> {
 }
 
 /// Probes every media file in `entries` for duration/codec/resolution info.
-/// Files ffmpeg can't open (corrupt, unsupported, or not actually media
-/// despite the extension) are silently omitted from the result.
+/// Failed probes are recorded as scan warnings.
 pub fn probe_all<F: Fn(u64, u64) + Sync>(
     entries: &[FileEntry],
     on_progress: F,
+    control: &ScanControl,
 ) -> HashMap<String, MediaInfo> {
     let candidates: Vec<&FileEntry> = entries
         .iter()
@@ -132,7 +184,13 @@ pub fn probe_all<F: Fn(u64, u64) + Sync>(
         .par_iter()
         .filter_map(|e| {
             let kind = media_kind_for(&e.path)?;
-            let result = probe(&e.path, kind).map(|info| (e.path.clone(), info));
+            let result = match probe(&e.path, kind, control) {
+                Ok(info) => Some((e.path.clone(), info)),
+                Err(error) => {
+                    control.warn(&e.path, error);
+                    None
+                }
+            };
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
             on_progress(d, total);
             result
@@ -202,8 +260,8 @@ fn cluster_sorted(
     };
 
     for item in sorted {
-        if let Some(last) = cluster.last() {
-            if item.1.duration_secs - last.1.duration_secs > tolerance_secs {
+        if let Some(first) = cluster.first() {
+            if item.1.duration_secs - first.1.duration_secs > tolerance_secs {
                 flush(&mut cluster, &mut groups);
             }
         }
@@ -310,6 +368,74 @@ mod tests {
         assert!(groups.is_empty());
     }
 
+    #[test]
+    fn duration_chains_cannot_exceed_the_tolerance() {
+        let entries = vec![entry("a", 1), entry("b", 2), entry("c", 3)];
+        let lookup = HashMap::from([
+            ("a".into(), info(MediaKind::Video, 10.0)),
+            ("b".into(), info(MediaKind::Video, 10.8)),
+            ("c".into(), info(MediaKind::Video, 11.6)),
+        ]);
+        let groups = cluster_by_duration(&entries, &lookup, 1.0, &HashSet::new());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].files.len(), 2);
+    }
+
+    #[test]
+    fn non_finite_durations_are_rejected() {
+        for duration in ["NaN", "inf", "-inf", "0", "-1"] {
+            let json = format!(r#"{{"format":{{"duration":"{duration}"}},"streams":[]}}"#);
+            assert!(parse_probe(json.as_bytes(), MediaKind::Video).is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stalled_process_is_killed_on_timeout() {
+        let start = Instant::now();
+        let error = run_command(
+            Command::new("sh").args(["-c", "exec sleep 10"]),
+            &ScanControl::default(),
+            Duration::from_millis(60),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_kills_a_running_process() {
+        let control = ScanControl::default();
+        let cancel = control.cancelled.clone();
+        let thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(70));
+            cancel.store(true, Ordering::SeqCst);
+        });
+        let start = Instant::now();
+        let error = run_command(
+            Command::new("sh").args(["-c", "exec sleep 10"]),
+            &control,
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        thread.join().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_output_larger_than_a_pipe_does_not_deadlock() {
+        let result = run_command(
+            Command::new("sh").args(["-c", "head -c 100000 /dev/zero"]),
+            &ScanControl::default(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(result.len(), 100000);
+    }
+
     proptest! {
         #[test]
         fn clusters_stay_within_tolerance_and_never_reuse_a_file(
@@ -339,9 +465,7 @@ mod tests {
                     .map(|f| lookup[&f.entry.path].duration_secs)
                     .collect();
                 group_durations.sort_by(f64::total_cmp);
-                for pair in group_durations.windows(2) {
-                    prop_assert!(pair[1] - pair[0] <= tolerance + 1e-9);
-                }
+                prop_assert!(group_durations.last().unwrap() - group_durations[0] <= tolerance + 1e-9);
 
                 let total: u64 = group.files.iter().map(|f| f.entry.size).sum();
                 let max = group.files.iter().map(|f| f.entry.size).max().unwrap();

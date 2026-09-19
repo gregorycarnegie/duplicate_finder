@@ -51,6 +51,7 @@ pub struct ScanSummary {
     pub reclaimable_bytes: u64,
     pub elapsed_ms: u64,
     pub ffmpeg_available: bool,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +69,7 @@ pub enum ScanProgress {
     Walking { folder: String, files_found: u64 },
     Hashing { done: u64, total: u64 },
     Probing { done: u64, total: u64 },
+    Verifying { done: u64, total: u64 },
 }
 
 fn recompute_group(group: &mut DuplicateGroup) {
@@ -93,7 +95,6 @@ pub fn remove_paths(summary: &mut ScanSummary, removed: &HashSet<String>) {
     summary.reclaimable_bytes = summary
         .exact_groups
         .iter()
-        .chain(summary.media_groups.iter())
         .map(|g| g.reclaimable_bytes)
         .sum();
 }
@@ -127,6 +128,7 @@ mod tests {
             reclaimable_bytes: 200,
             elapsed_ms: 0,
             ffmpeg_available: false,
+            warnings: vec![],
         };
 
         remove_paths(&mut summary, &HashSet::from(["b".to_string()]));
@@ -149,6 +151,7 @@ mod tests {
             reclaimable_bytes: 100,
             elapsed_ms: 0,
             ffmpeg_available: false,
+            warnings: vec![],
         };
 
         remove_paths(&mut summary, &HashSet::from(["b".to_string()]));
@@ -188,7 +191,22 @@ mod tests {
             reclaimable_bytes,
             elapsed_ms: 0,
             ffmpeg_available: false,
+            warnings: vec![],
         }
+    }
+
+    #[test]
+    fn duration_candidates_do_not_count_as_reclaimable_space() {
+        let mut summary = summary_from_group_sizes(&[vec![100, 100]]);
+        summary.media_groups = vec![DuplicateGroup {
+            files: vec![file("media-a", 500), file("media-b", 1000)],
+            reclaimable_bytes: 500,
+        }];
+        remove_paths(&mut summary, &HashSet::new());
+        assert_eq!(summary.reclaimable_bytes, 100);
+        remove_paths(&mut summary, &HashSet::from(["f0".into()]));
+        assert_eq!(summary.reclaimable_bytes, 0);
+        assert_eq!(summary.media_groups.len(), 1);
     }
 
     proptest! {

@@ -1,0 +1,172 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Duplicate Finder frontend regression tests</title>
+<pre id="results" data-status="running"></pre>
+<script>
+const output = document.getElementById("results");
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+async function until(predicate) {
+  for (let i = 0; i < 100; i++) { if (predicate()) return; await tick(); }
+  throw new Error("Timed out waiting for UI state");
+}
+function mockTauri() {
+  const t = window.__test = { calls: [], confirmations: [], handlers: {}, errors: [], unlistened: 0 };
+  addEventListener("error", (e) => t.errors.push(e.message));
+  addEventListener("unhandledrejection", (e) => t.errors.push(String(e.reason)));
+  const appWindow = {
+    isMaximized: async () => false, onResized: async () => {},
+    minimize: async () => {}, toggleMaximize: async () => {}, close: async () => {},
+  };
+  window.__TAURI__ = {
+    core: { invoke: async (name, args) => {
+      t.calls.push({ name, args });
+      if (t.handlers[name]) return t.handlers[name](args);
+      if (name === "pick_folders") return ["/test"];
+      throw new Error(`Unexpected command: ${name}`);
+    } },
+    event: { listen: async (_, callback) => {
+      if (t.listenError) throw new Error(t.listenError);
+      t.progress = callback;
+      return () => { t.unlistened++; };
+    } },
+    window: { getCurrentWindow: () => appWindow },
+    webview: { getCurrentWebview: () => ({ onDragDropEvent: async () => {} }) },
+    menu: { Menu: { new: async () => ({ popup: async () => {} }) }, MenuItem: { new: async () => ({ setText: async () => {} }) } },
+    dialog: { confirm: async (message) => {
+      t.confirmations.push(message);
+      return t.confirm ? t.confirm(message) : true;
+    } },
+  };
+}
+function summary(count = 3) {
+  return {
+    exactGroups: count ? [{ headerLeft: `${count} files`, headerRight: "8 B reclaimable", files: Array.from({ length: count }, (_, i) => ({ path: `/test/${i}`, size: 4, sizeText: "4 B", detailText: "", playable: false })) }] : [],
+    mediaGroups: [], filesScannedText: `${count} files scanned`, reclaimableText: "8 B reclaimable", elapsedText: "finished in 1ms", ffmpegAvailable: true, warnings: [],
+  };
+}
+let iframe;
+async function fixture() {
+  iframe = document.createElement("iframe");
+  iframe.style = "width:1180px;height:780px";
+  const html = await (await fetch("/ui/index.html")).text();
+  const loaded = new Promise((resolve) => iframe.onload = resolve);
+  iframe.srcdoc = html.replace("<head>", `<head><base href="/ui/"><script>(${mockTauri.toString()})();<\/script>`);
+  document.body.append(iframe);
+  await loaded;
+  const win = iframe.contentWindow;
+  const doc = win.document;
+  const t = win.__test;
+  assert(t, "Mock Tauri failed to load");
+  const el = (id) => doc.getElementById(id);
+  el("btn-add-folder").click();
+  await until(() => !el("btn-start-scan").disabled);
+  async function scan(value = summary()) {
+    t.handlers.scan = async () => value;
+    el("btn-start-scan").click();
+    await until(() => doc.body.dataset.screen === "results");
+  }
+  const select = (index) => doc.querySelectorAll(".dupe-file input")[index].click();
+  return { win, doc, t, el, scan, select };
+}
+const tests = [
+  ["scan issues are visible and incomplete results do not claim a clean scan", async () => {
+    const { scan, el, win } = await fixture();
+    const value = summary(0);
+    value.warnings = ["/unreadable: Permission denied", "<img src=x onerror='window.injected=true'>"];
+    await scan(value);
+    assert(!el("scan-warnings").hidden, "Warnings hidden");
+    assert(el("scan-warning-list").children.length === 2, "Missing details");
+    assert(el("results-empty").textContent.includes("successfully checked"), "Misleading empty state");
+    assert(!win.injected && !el("scan-warning-list").querySelector("img"), "Warning interpreted as HTML");
+  }],
+  ["cancel interrupts scanning and removes progress listener", async () => {
+    const { t, el, doc } = await fixture();
+    let rejectScan;
+    t.handlers.scan = () => new Promise((_, reject) => rejectScan = reject);
+    t.handlers.cancel_scan = () => rejectScan("Scan cancelled.");
+    el("btn-start-scan").click();
+    await until(() => !el("btn-cancel-scan").disabled);
+    el("btn-cancel-scan").click();
+    await until(() => doc.body.dataset.screen === "setup");
+    assert(el("setup-note").textContent === "Scan cancelled.", "Missing cancellation status");
+    assert(t.unlistened === 1, "Listener leaked");
+  }],
+  ["progress listener failure restores the setup screen", async () => {
+    const { t, el, doc } = await fixture();
+    t.listenError = "Event connection failed";
+    el("btn-start-scan").click();
+    await until(() => doc.body.dataset.screen === "setup");
+    assert(el("setup-note").textContent.includes(t.listenError), "Missing error");
+    assert(!t.calls.some((c) => c.name === "scan"), "Scan started without listener");
+  }],
+  ["selecting every copy cannot start deletion", async () => {
+    const { scan, el, select, t } = await fixture();
+    await scan(summary(2)); select(0); select(1);
+    el("btn-trash").click(); await tick();
+    assert(t.confirmations.length === 0, "Deletion confirmation should not open");
+    assert(el("toast").textContent.includes("Keep at least one"), "Missing keep-copy message");
+  }],
+  ["changed-file rejection never offers permanent deletion", async () => {
+    const { scan, el, select, t } = await fixture();
+    const value = summary(); await scan(value); select(0);
+    t.handlers.trash_files = async () => ({ summary: value, failures: [{ path: "/test/0", error: "File changed; scan again", canDeletePermanently: false }] });
+    el("btn-trash").click();
+    await until(() => !el("btn-trash").disabled);
+    assert(t.confirmations.length === 1, "Unsafe permanent-delete fallback");
+    assert(!el("operation-errors").hidden, "Error details hidden");
+    assert(el("operation-errors").textContent.includes("scan again"), "Actual error lost");
+  }],
+  ["permanent deletion receives only eligible failures", async () => {
+    const { scan, el, select, t } = await fixture();
+    const value = summary(); await scan(value); select(0); select(1);
+    t.handlers.trash_files = async () => ({ summary: value, failures: [
+      { path: "/test/0", error: "File changed", canDeletePermanently: false },
+      { path: "/test/1", error: "No trash support", canDeletePermanently: true },
+    ] });
+    t.handlers.delete_files_permanently = async ({ paths }) => {
+      assert(paths.length === 1 && paths[0] === "/test/1", "Unsafe paths in permanent deletion");
+      return { summary: value, failures: [] };
+    };
+    el("btn-trash").click(); await until(() => !el("btn-trash").disabled);
+    assert(t.confirmations.length === 2, "Missing explicit permanent confirmation");
+    assert(el("operation-errors").textContent.includes("File changed"), "Blocked error lost after partial success");
+  }],
+  ["deletion locks navigation and repeated actions until completion", async () => {
+    const { scan, el, select, t, doc, win } = await fixture();
+    const value = summary(); await scan(value); select(0);
+    let finish;
+    t.handlers.trash_files = () => new Promise((resolve) => finish = resolve);
+    el("btn-trash").click(); await until(() => finish);
+    assert(el("btn-new-scan").disabled, "Navigation remains enabled");
+    el("btn-new-scan").dispatchEvent(new win.Event("click"));
+    el("btn-trash").dispatchEvent(new win.Event("click"));
+    assert(doc.body.dataset.screen === "results", "New scan raced deletion");
+    assert(t.calls.filter((c) => c.name === "trash_files").length === 1, "Duplicate deletion started");
+    finish({ summary: summary(0), failures: [] });
+    await until(() => !el("btn-trash").disabled);
+    assert(!el("btn-new-scan").disabled, "Navigation not restored");
+  }],
+  ["duration-only selections carry an explicit content warning", async () => {
+    const { scan, el, select, t } = await fixture();
+    const value = summary(); value.mediaGroups = value.exactGroups; value.exactGroups = [];
+    await scan(value); select(0); t.confirm = () => false;
+    el("btn-trash").click(); await until(() => !el("btn-trash").disabled);
+    assert(t.confirmations[0].includes("content may be completely different"), "Missing media warning");
+    assert(!t.calls.some((c) => c.name === "trash_files"), "Cancelled confirmation removed files");
+  }],
+];
+(async () => {
+  let failed = 0;
+  for (const [name, run] of tests) {
+    try {
+      await run(); await tick();
+      assert(iframe.contentWindow.__test.errors.length === 0, iframe.contentWindow.__test.errors.join("; "));
+      output.textContent += `PASS ${name}\n`;
+    } catch (error) { failed++; output.textContent += `FAIL ${name}: ${error.stack}\n`; }
+    finally { iframe?.remove(); }
+  }
+  output.textContent += `${tests.length - failed} passed; ${failed} failed\n`;
+  output.dataset.status = failed ? "failed" : "passed";
+})();
+</script>

@@ -139,6 +139,7 @@ pub struct ScanSummaryView {
     pub reclaimable_text: String,
     pub elapsed_text: String,
     pub ffmpeg_available: bool,
+    pub warnings: Vec<String>,
 }
 
 fn present_file(file: &DuplicateFile) -> FileView {
@@ -179,7 +180,10 @@ fn group_header_left(group: &DuplicateGroup, kind: GroupKind) -> String {
 fn present_group(group: &DuplicateGroup, kind: GroupKind) -> GroupView {
     GroupView {
         header_left: group_header_left(group, kind),
-        header_right: format!("{} reclaimable", format_bytes(group.reclaimable_bytes)),
+        header_right: match kind {
+            GroupKind::Exact => format!("{} reclaimable", format_bytes(group.reclaimable_bytes)),
+            GroupKind::Media => "Compare content before removing".to_string(),
+        },
         files: group.files.iter().map(present_file).collect(),
     }
 }
@@ -200,6 +204,7 @@ pub fn present_summary(summary: &ScanSummary) -> ScanSummaryView {
         reclaimable_text: format!("{} reclaimable", format_bytes(summary.reclaimable_bytes)),
         elapsed_text: format!("finished in {}", format_ms(summary.elapsed_ms)),
         ffmpeg_available: summary.ffmpeg_available,
+        warnings: summary.warnings.clone(),
     }
 }
 

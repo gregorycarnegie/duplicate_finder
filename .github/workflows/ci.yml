@@ -27,5 +27,8 @@ jobs:
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Frontend regression tests
+        run: python3 tests/run_frontend.py
+
       - name: Build
         run: cargo build --manifest-path src-tauri/Cargo.toml

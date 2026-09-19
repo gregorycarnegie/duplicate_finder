@@ -1,4 +1,8 @@
-use crate::model::FileEntry;
+use crate::{
+    model::FileEntry,
+    scan_control::{FileStamp, ScanControl},
+};
+use std::collections::HashSet;
 use std::time::UNIX_EPOCH;
 use walkdir::{DirEntry, WalkDir};
 
@@ -12,27 +16,66 @@ fn is_hidden(entry: &DirEntry) -> bool {
 
 /// Recursively walks the given folders, collecting file metadata.
 /// Calls `on_progress(folder, files_found_so_far)` periodically.
+#[cfg(test)]
 pub fn walk_folders<F: FnMut(&str, u64)>(
     folders: &[String],
     include_hidden: bool,
     min_file_size: u64,
-    mut on_progress: F,
+    on_progress: F,
 ) -> Vec<FileEntry> {
-    let mut entries = Vec::new();
+    walk_folders_controlled(
+        folders,
+        include_hidden,
+        min_file_size,
+        on_progress,
+        &ScanControl::default(),
+    )
+    .unwrap()
+}
 
+pub fn walk_folders_controlled<F: FnMut(&str, u64)>(
+    folders: &[String],
+    include_hidden: bool,
+    min_file_size: u64,
+    mut on_progress: F,
+    control: &ScanControl,
+) -> std::io::Result<Vec<FileEntry>> {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
     for folder in folders {
+        control.check()?;
         let walker = WalkDir::new(folder)
             .into_iter()
             .filter_entry(|e| include_hidden || e.depth() == 0 || !is_hidden(e));
-
         for item in walker {
-            let Ok(item) = item else { continue };
+            control.check()?;
+            let item = match item {
+                Ok(item) => item,
+                Err(error) => {
+                    control.warn(folder, error);
+                    continue;
+                }
+            };
             if !item.file_type().is_file() {
                 continue;
             }
-            let Ok(meta) = item.metadata() else { continue };
-            let size = meta.len();
-            if size < min_file_size {
+            let result = (|| -> std::io::Result<_> {
+                let path = item.path().canonicalize()?;
+                let path = path.into_os_string().into_string().map_err(|_| {
+                    std::io::Error::other("Filename cannot be represented as UTF-8")
+                })?;
+                let meta = std::fs::symlink_metadata(&path)?;
+                let stamp = FileStamp::from_metadata(&meta)?;
+                Ok((path, meta, stamp))
+            })();
+            let (path, meta, stamp) = match result {
+                Ok(value) => value,
+                Err(error) => {
+                    control.warn(&item.path().display().to_string(), error);
+                    continue;
+                }
+            };
+            if !seen.insert(path.clone()) || meta.len() < min_file_size {
                 continue;
             }
             let modified = meta
@@ -40,27 +83,86 @@ pub fn walk_folders<F: FnMut(&str, u64)>(
                 .ok()
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64);
-
+            control.stamps.lock().unwrap().insert(path.clone(), stamp);
             entries.push(FileEntry {
-                path: item.path().to_string_lossy().to_string(),
-                size,
+                path,
+                size: meta.len(),
                 modified,
             });
-
             if entries.len() % 100 == 0 {
                 on_progress(folder, entries.len() as u64);
             }
         }
         on_progress(folder, entries.len() as u64);
     }
-
-    entries
+    control.check()?;
+    Ok(entries)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn overlapping_and_aliased_roots_do_not_create_duplicates() {
+        let dir = crate::test_support::TestDir::new();
+        fs::create_dir(dir.0.join("child")).unwrap();
+        dir.file("child/only.bin", b"one file");
+        let root = dir.0.to_str().unwrap().to_string();
+        let entries = walk_folders(
+            &[root.clone(), format!("{root}/child"), format!("{root}/.")],
+            true,
+            0,
+            |_, _| {},
+        );
+        assert_eq!(entries.len(), 1);
+        assert!(
+            crate::hashing::find_exact_duplicates(&entries, &Default::default(), |_, _| {})
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn missing_roots_are_reported_and_valid_files_still_scanned() {
+        let dir = crate::test_support::TestDir::new();
+        dir.file("valid", b"data");
+        let control = ScanControl::default();
+        let entries = walk_folders_controlled(
+            &[
+                dir.0.join("missing").to_str().unwrap().into(),
+                dir.0.to_str().unwrap().into(),
+            ],
+            true,
+            0,
+            |_, _| {},
+            &control,
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(control.warnings().len(), 1);
+    }
+
+    #[test]
+    fn cancellation_interrupts_walking() {
+        let dir = crate::test_support::TestDir::new();
+        for i in 0..110 {
+            dir.file(&i.to_string(), b"data");
+        }
+        let control = ScanControl::default();
+        let result = walk_folders_controlled(
+            &[dir.0.to_str().unwrap().into()],
+            true,
+            0,
+            |_, _| {
+                control
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst)
+            },
+            &control,
+        );
+        assert!(matches!(result, Err(error) if error.kind() == std::io::ErrorKind::Interrupted));
+    }
 
     fn names_of(entries: &[FileEntry]) -> Vec<String> {
         let mut names: Vec<String> = entries

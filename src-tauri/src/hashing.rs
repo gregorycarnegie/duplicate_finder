@@ -1,4 +1,5 @@
 use crate::model::{DuplicateFile, DuplicateGroup, FileEntry, MediaInfo};
+use crate::scan_control::{FileStamp, ScanControl};
 use rayon::prelude::*;
 use std::{
     collections::HashMap,
@@ -11,27 +12,58 @@ const CHUNK_SIZE: usize = 1024 * 1024;
 // ponytail: 64 KiB at each end; increase only if real scans show frequent sample collisions.
 const SAMPLE_SIZE: usize = 64 * 1024;
 
+#[cfg(test)]
 pub fn hash_file(path: &str) -> std::io::Result<blake3::Hash> {
+    hash_file_controlled(path, &ScanControl::default())
+}
+
+pub fn hash_file_controlled(path: &str, control: &ScanControl) -> std::io::Result<blake3::Hash> {
+    control.check()?;
+    let before = FileStamp::read(path)?;
     let file = File::open(path)?;
+    if FileStamp::from_metadata(&file.metadata()?)? != before {
+        return Err(std::io::Error::other(
+            "File changed while opening; scan again",
+        ));
+    }
     let mut reader = BufReader::new(file);
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; CHUNK_SIZE];
     loop {
+        control.check()?;
         let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
     }
+    if FileStamp::read(path)? != before
+        || FileStamp::from_metadata(&reader.get_ref().metadata()?)? != before
+    {
+        return Err(std::io::Error::other(
+            "File changed while hashing; scan again",
+        ));
+    }
     Ok(hasher.finalize())
 }
 
-fn sample_hash(path: &str, size: u64) -> std::io::Result<(blake3::Hash, bool)> {
+fn sample_hash(
+    path: &str,
+    size: u64,
+    control: &ScanControl,
+) -> std::io::Result<(blake3::Hash, bool)> {
     if size <= (SAMPLE_SIZE * 2) as u64 {
-        return hash_file(path).map(|hash| (hash, true));
+        return hash_file_controlled(path, control).map(|hash| (hash, true));
     }
 
+    control.check()?;
+    let before = FileStamp::read(path)?;
     let mut file = File::open(path)?;
+    if FileStamp::from_metadata(&file.metadata()?)? != before {
+        return Err(std::io::Error::other(
+            "File changed while opening; scan again",
+        ));
+    }
     let mut hasher = blake3::Hasher::new();
     let mut sample = [0; SAMPLE_SIZE];
     file.read_exact(&mut sample)?;
@@ -39,16 +71,31 @@ fn sample_hash(path: &str, size: u64) -> std::io::Result<(blake3::Hash, bool)> {
     file.seek(SeekFrom::End(-(SAMPLE_SIZE as i64)))?;
     file.read_exact(&mut sample)?;
     hasher.update(&sample);
+    if FileStamp::read(path)? != before || FileStamp::from_metadata(&file.metadata()?)? != before {
+        return Err(std::io::Error::other(
+            "File changed while sampling; scan again",
+        ));
+    }
     Ok((hasher.finalize(), false))
 }
 
 /// Groups files that share an identical byte-for-byte content hash.
 /// Only files that share a size with at least one other file are hashed,
 /// since a unique size can never be an exact duplicate.
+#[cfg(test)]
 pub fn find_exact_duplicates<F: Fn(u64, u64) + Sync>(
     entries: &[FileEntry],
     media_lookup: &HashMap<String, MediaInfo>,
     on_progress: F,
+) -> Vec<DuplicateGroup> {
+    find_exact_duplicates_controlled(entries, media_lookup, on_progress, &ScanControl::default())
+}
+
+pub fn find_exact_duplicates_controlled<F: Fn(u64, u64) + Sync>(
+    entries: &[FileEntry],
+    media_lookup: &HashMap<String, MediaInfo>,
+    on_progress: F,
+    control: &ScanControl,
 ) -> Vec<DuplicateGroup> {
     let mut by_size: HashMap<u64, Vec<&FileEntry>> = HashMap::new();
     for e in entries {
@@ -64,10 +111,17 @@ pub fn find_exact_duplicates<F: Fn(u64, u64) + Sync>(
     let total = candidates.len() as u64;
     let sampled: Vec<(blake3::Hash, bool, &FileEntry)> = candidates
         .par_iter()
-        .filter_map(|e| {
-            sample_hash(&e.path, e.size)
-                .ok()
-                .map(|(hash, complete)| (hash, complete, *e))
+        .filter_map(|e| match sample_hash(&e.path, e.size, control) {
+            Ok((hash, complete)) => {
+                if complete {
+                    control.hashes.lock().unwrap().insert(e.path.clone(), hash);
+                }
+                Some((hash, complete, *e))
+            }
+            Err(error) => {
+                control.warn(&e.path, error);
+                None
+            }
         })
         .collect();
 
@@ -94,7 +148,20 @@ pub fn find_exact_duplicates<F: Fn(u64, u64) + Sync>(
     let done = AtomicU64::new(total - full_candidates.len() as u64);
     on_progress(done.load(Ordering::Relaxed), total);
     hashed.par_extend(full_candidates.par_iter().filter_map(|entry| {
-        let result = hash_file(&entry.path).ok().map(|hash| (hash, *entry));
+        let result = match hash_file_controlled(&entry.path, control) {
+            Ok(hash) => {
+                control
+                    .hashes
+                    .lock()
+                    .unwrap()
+                    .insert(entry.path.clone(), hash);
+                Some((hash, *entry))
+            }
+            Err(error) => {
+                control.warn(&entry.path, error);
+                None
+            }
+        };
         let done = done.fetch_add(1, Ordering::Relaxed) + 1;
         on_progress(done, total);
         result
@@ -129,6 +196,43 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::{fs, hint::black_box, io::Write, path::PathBuf, time::Instant};
+
+    #[test]
+    fn unreadable_candidates_are_reported() {
+        let dir = crate::test_support::TestDir::new();
+        let path = dir.file("a", b"same");
+        let missing = dir.0.join("missing").to_str().unwrap().to_string();
+        let entries = vec![
+            FileEntry {
+                path,
+                size: 4,
+                modified: None,
+            },
+            FileEntry {
+                path: missing,
+                size: 4,
+                modified: None,
+            },
+        ];
+        let control = ScanControl::default();
+        assert!(
+            find_exact_duplicates_controlled(&entries, &HashMap::new(), |_, _| {}, &control)
+                .is_empty()
+        );
+        assert_eq!(control.warnings().len(), 1);
+    }
+
+    #[test]
+    fn hashing_honours_cancellation() {
+        let dir = crate::test_support::TestDir::new();
+        let path = dir.file("data", b"content");
+        let control = ScanControl::default();
+        control.cancelled.store(true, Ordering::SeqCst);
+        assert_eq!(
+            hash_file_controlled(&path, &control).unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+    }
 
     fn entries_in(root: &PathBuf) -> Vec<FileEntry> {
         fs::read_dir(root)

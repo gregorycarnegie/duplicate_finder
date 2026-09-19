@@ -14,6 +14,8 @@
     folders: [],
     summary: null,
     selected: new Set(),
+    scanning: false,
+    removing: false,
   };
 
   // ---------------------------------------------------------------
@@ -132,7 +134,7 @@
   });
 
   toleranceInput.addEventListener("input", () => {
-    toleranceReadout.textContent = `± ${Number(toleranceInput.value).toFixed(1)}s`;
+    toleranceReadout.textContent = `${Number(toleranceInput.value).toFixed(1)}s maximum spread`;
   });
 
   btnStartScan.addEventListener("click", startScan);
@@ -162,7 +164,21 @@
     scanLog.innerHTML = "";
   }
 
+  const btnCancelScan = document.getElementById("btn-cancel-scan");
+  btnCancelScan.addEventListener("click", async () => {
+    btnCancelScan.disabled = true;
+    btnCancelScan.textContent = "Cancelling…";
+    try { await invoke("cancel_scan"); }
+    catch (err) { showToast(String(err), true); btnCancelScan.disabled = false; }
+  });
+
   async function startScan() {
+    if (state.scanning || state.removing) return;
+    state.scanning = true;
+    state.summary = null;
+    state.selected = new Set();
+    btnCancelScan.disabled = true;
+    btnCancelScan.textContent = "Cancel scan";
     resetScanScreen();
     setScreen("scanning");
     setupNote.textContent = "";
@@ -176,31 +192,36 @@
 
     const seenFolders = new Set();
 
-    const unlistenProgress = await listen("scan-progress", (event) => {
-      const p = event.payload;
-      if (p.phase === "walking") {
-        statFiles.textContent = p.filesFound.toLocaleString();
-        if (!seenFolders.has(p.folder)) {
-          seenFolders.add(p.folder);
-          logLine(`walking ${p.folder}`);
-        }
-      } else if (p.phase === "probing") {
-        statProbed.textContent = p.done.toLocaleString();
-        if (p.done === 1) logLine(`probing media durations…`);
-        if (p.total > 0) {
-          scanRailFill.style.width = `${Math.min(100, (p.done / p.total) * 50)}%`;
-        }
-      } else if (p.phase === "hashing") {
-        statHashed.textContent = p.done.toLocaleString();
-        if (p.done === 1) logLine(`hashing candidates…`);
-        if (p.total > 0) {
-          scanRailFill.style.width = `${50 + Math.min(100, (p.done / p.total) * 50)}%`;
-        }
-      }
-    });
-
+    let unlistenProgress = () => {};
     try {
-      const summary = await invoke("scan", { options });
+      unlistenProgress = await listen("scan-progress", (event) => {
+        const p = event.payload;
+        if (p.phase === "walking") {
+          statFiles.textContent = p.filesFound.toLocaleString();
+          if (!seenFolders.has(p.folder)) {
+            seenFolders.add(p.folder);
+            logLine(`walking ${p.folder}`);
+          }
+        } else if (p.phase === "probing") {
+          statProbed.textContent = p.done.toLocaleString();
+          if (p.done === 1) logLine(`probing media durations…`);
+          if (p.total > 0) {
+            scanRailFill.style.width = `${Math.min(100, (p.done / p.total) * 40)}%`;
+          }
+        } else if (p.phase === "hashing") {
+          statHashed.textContent = p.done.toLocaleString();
+          if (p.done === 1) logLine(`hashing candidates…`);
+          if (p.total > 0) {
+            scanRailFill.style.width = `${40 + Math.min(40, (p.done / p.total) * 40)}%`;
+          }
+        } else if (p.phase === "verifying") {
+          if (p.done === 0) logLine("verifying result files before review…");
+          if (p.total > 0) scanRailFill.style.width = `${80 + (p.done / p.total) * 20}%`;
+        }
+      });
+      const pendingScan = invoke("scan", { options });
+      btnCancelScan.disabled = false;
+      const summary = await pendingScan;
       state.summary = summary;
       state.selected = new Set();
       scanRailFill.style.width = "100%";
@@ -209,8 +230,10 @@
     } catch (err) {
       setScreen("setup");
       setupNote.textContent = String(err);
-      showToast(String(err), true);
+      if (String(err) !== "Scan cancelled.") showToast(String(err), true);
     } finally {
+      state.scanning = false;
+      btnCancelScan.disabled = true;
       unlistenProgress();
     }
   }
@@ -242,7 +265,7 @@
     const selectItem = await MenuItem.new({
       text: "Select for trash",
       action: () => {
-        if (!contextFile) return;
+        if (!contextFile || state.removing) return;
         if (state.selected.has(contextFile.path)) state.selected.delete(contextFile.path);
         else state.selected.add(contextFile.path);
         contextCheckbox.checked = state.selected.has(contextFile.path);
@@ -288,6 +311,7 @@
     checkbox.type = "checkbox";
     checkbox.checked = state.selected.has(file.path);
     checkbox.addEventListener("change", () => {
+      if (state.removing) { checkbox.checked = state.selected.has(file.path); return; }
       if (checkbox.checked) state.selected.add(file.path);
       else state.selected.delete(file.path);
       updateLedger();
@@ -354,10 +378,25 @@
 
   function renderResults() {
     const s = state.summary;
+    const visiblePaths = new Set([...s.exactGroups, ...s.mediaGroups].flatMap((group) => group.files.map((file) => file.path)));
+    state.selected = new Set([...state.selected].filter((path) => visiblePaths.has(path)));
     summaryFiles.textContent = s.filesScannedText;
     summaryReclaim.textContent = s.reclaimableText;
     summaryTime.textContent = s.elapsedText;
     ffmpegNote.hidden = s.ffmpegAvailable;
+    const warnings = document.getElementById("scan-warnings");
+    warnings.hidden = !s.warnings.length;
+    document.getElementById("scan-warning-count").textContent = `${s.warnings.length} scan issue(s) — results may be incomplete`;
+    const warningList = document.getElementById("scan-warning-list");
+    warningList.replaceChildren();
+    for (const warning of s.warnings) {
+      const li = document.createElement("li");
+      li.textContent = warning;
+      warningList.append(li);
+    }
+    resultsEmpty.textContent = s.warnings.length
+      ? "No matches found among the files successfully checked. Review the scan issues above."
+      : "No matches found.";
 
     exactGroupsEl.innerHTML = "";
     mediaGroupsEl.innerHTML = "";
@@ -397,6 +436,8 @@
   }
 
   btnNewScan.addEventListener("click", () => {
+    if (state.removing) return;
+    document.getElementById("operation-errors").hidden = true;
     state.summary = null;
     state.selected = new Set();
     updateLedger();
@@ -404,55 +445,66 @@
   });
 
   btnTrash.addEventListener("click", async () => {
+    if (state.removing || state.scanning) return;
     const paths = [...state.selected];
     if (paths.length === 0) return;
-    const noun = paths.length === 1 ? "file" : "files";
-    const confirmed = await confirm(
-      `Move ${paths.length} ${noun} to the trash? This can be undone from your system trash.`,
-      { title: "Move to trash", kind: "warning" },
-    );
-    if (!confirmed) return;
+    const groups = [...state.summary.exactGroups, ...state.summary.mediaGroups];
+    if (groups.some((group) => group.files.every((file) => state.selected.has(file.path)))) {
+      showToast("Keep at least one file in each group.", true);
+      return;
+    }
+    state.removing = true;
     btnTrash.disabled = true;
+    btnNewScan.disabled = true;
+    const errorPanel = document.getElementById("operation-errors");
+    errorPanel.hidden = true;
     try {
-      const { summary, failures } = await invoke("trash_files", { paths });
-      state.summary = summary;
-      const failedPaths = new Set(failures.map((f) => f.path));
-      const trashedCount = paths.length - failedPaths.size;
+      const noun = paths.length === 1 ? "file" : "files";
+      const hasMedia = state.summary.mediaGroups.some((group) => group.files.some((file) => state.selected.has(file.path)));
+      const confirmed = await confirm(
+        `Move ${paths.length} ${noun} to the trash? This can be undone from your system trash.` +
+        (hasMedia ? "\n\nSome selected files only have similar durations. Their content may be completely different. Compare them before removing." : ""),
+        { title: "Move to trash", kind: "warning" },
+      );
+      if (!confirmed) return;
+      const result = await invoke("trash_files", { paths });
+      state.summary = result.summary;
+      let failures = result.failures;
+      let failedPaths = new Set(failures.map((f) => f.path));
       state.selected = new Set(paths.filter((p) => failedPaths.has(p)));
+      const trashedCount = paths.length - failedPaths.size;
+      if (trashedCount > 0) showToast(`Moved ${trashedCount} ${trashedCount === 1 ? "file" : "files"} to trash.`);
 
-      if (trashedCount > 0) {
-        showToast(`Moved ${trashedCount} ${trashedCount === 1 ? "file" : "files"} to trash.`);
-      }
-
-      if (failures.length > 0) {
-        const failedNoun = failures.length === 1 ? "file" : "files";
-        const list = failures.map((f) => f.path).join("\n");
+      const eligible = failures.filter((f) => f.canDeletePermanently);
+      if (eligible.length > 0) {
+        const list = eligible.map((f) => `${f.path}: ${f.error}`).join("\n");
         const permanent = await confirm(
-          `${failures.length} ${failedNoun} could not be moved to the trash (no recycle bin support, ` +
-            `e.g. a network share or NAS):\n\n${list}\n\n` +
-            `Permanently delete ${failures.length === 1 ? "it" : "them"} instead? This cannot be undone.`,
+          `These files could not be moved to the trash:\n\n${list}\n\nPermanently delete them instead? This cannot be undone.`,
           { title: "Permanently delete", kind: "warning" },
         );
         if (permanent) {
-          const permResult = await invoke("delete_files_permanently", { paths: [...failedPaths] });
+          const permResult = await invoke("delete_files_permanently", { paths: eligible.map((f) => f.path) });
           state.summary = permResult.summary;
-          const permFailedPaths = new Set(permResult.failures.map((f) => f.path));
-          const deletedCount = failedPaths.size - permFailedPaths.size;
-          state.selected = new Set([...state.selected].filter((p) => permFailedPaths.has(p)));
-          if (deletedCount > 0) {
-            showToast(`Permanently deleted ${deletedCount} ${deletedCount === 1 ? "file" : "files"}.`);
-          }
-          if (permResult.failures.length > 0) {
-            showToast(`Failed to delete ${permResult.failures.length} ${permResult.failures.length === 1 ? "file" : "files"}.`, true);
-          }
+          failures = [...failures.filter((f) => !f.canDeletePermanently), ...permResult.failures];
+          failedPaths = new Set(failures.map((f) => f.path));
+          state.selected = new Set(paths.filter((p) => failedPaths.has(p)));
+          const deletedCount = eligible.length - permResult.failures.length;
+          if (deletedCount > 0) showToast(`Permanently deleted ${deletedCount} ${deletedCount === 1 ? "file" : "files"}.`);
         }
       }
-
-      renderResults();
+      if (failures.length > 0) {
+        errorPanel.textContent = failures.map((f) => `${f.path}: ${f.error}`).join("\n");
+        errorPanel.hidden = false;
+      }
     } catch (err) {
+      errorPanel.textContent = String(err);
+      errorPanel.hidden = false;
       showToast(String(err), true);
     } finally {
+      state.removing = false;
       btnTrash.disabled = false;
+      btnNewScan.disabled = false;
+      renderResults();
     }
   });
 

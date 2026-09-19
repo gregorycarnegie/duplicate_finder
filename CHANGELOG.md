@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Deduplicate canonical paths across overlapping scan roots.
+- Recheck metadata and content before removal and require an unchanged retained group member.
+- Restrict permanent-delete fallback to failed trash operations, with fresh verification.
+- Prevent overlapping scans/removals and lock frontend actions during deletion.
+- Bound duration groups by their full spread; label them as comparisons and exclude them from reclaimable space.
+- Add scan cancellation, bounded ffprobe execution, and visible per-file scan and removal errors.
+- Add Rust safety regressions and browser tests for cancellation, errors, and deletion flows.
+
 ## 0.5.0 - 2026-07-21
 
 ### Added

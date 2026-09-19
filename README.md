@@ -1,12 +1,12 @@
 # Duplicate Finder
 
-![Version](https://img.shields.io/badge/version-0.2.0-blue)
-[![Rust 2024](https://img.shields.io/badge/Rust-2024-orange?logo=rust)](https://www.rust-lang.org/)
+![Version](https://img.shields.io/badge/version-0.5.0-blue)
+[![Rust 2021](https://img.shields.io/badge/Rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![BLAKE3](https://img.shields.io/badge/hashing-BLAKE3-5E4AE3)](https://github.com/BLAKE3-team/BLAKE3)
 [![FFmpeg](https://img.shields.io/badge/media-FFmpeg-007808?logo=ffmpeg&logoColor=white)](https://ffmpeg.org/)
 
-Duplicate Finder is a desktop app for finding exact and likely duplicate files. It combines byte-for-byte content hashing with media-duration matching, making it useful for spotting copies of videos or audio files that have been re-encoded at a different resolution, bitrate, or file size.
+Duplicate Finder is a desktop app for finding exact duplicate files and media files worth comparing. It combines byte-for-byte content hashing with media-duration matching, making it useful for spotting copies of videos or audio files that have been re-encoded at a different resolution, bitrate, or file size.
 
 Built with Rust, Tauri 2, and a lightweight HTML/CSS/JavaScript interface.
 
@@ -16,10 +16,12 @@ Built with Rust, Tauri 2, and a lightweight HTML/CSS/JavaScript interface.
 - Add scan folders with the picker or drag and drop.
 - Find exact duplicates using full-file BLAKE3 hashes.
 - Avoid unnecessary work by hashing only files that share a file size.
-- Find likely duplicate audio and video files by duration.
+- Find audio and video files with similar durations for manual comparison.
 - Configure media-duration tolerance from 0 to 5 seconds.
 - Exclude small files and hidden files or folders.
-- View live scanning, probing, and hashing progress.
+- View live scanning, probing, hashing, and verification progress; cancel a scan.
+- Review scan issues for unreadable files, failed media probes, and files that changed.
+- Scan overlapping folders without counting the same canonical file path twice.
 - Review file sizes, dates, codecs, resolutions, and durations.
 - Double-click a file path to open it in its default application.
 - Select unwanted copies and move them to the operating system's trash or recycle bin.
@@ -111,18 +113,32 @@ Generated bundles are written below `src-tauri/target/release/bundle/`.
 1. Add one or more folders to scan.
 2. Choose a duration tolerance, minimum file size, and whether hidden files should be included.
 3. Start the scan.
-4. Review exact duplicates and likely media matches separately.
+4. Review exact duplicates and duration-only comparison groups separately.
 5. Select unwanted copies and choose **Move to trash**.
 
 Files are sent to the system trash rather than permanently deleted, but it is still worth checking paths and likely-duration matches carefully. Paths that don't support a trash/recycle bin (network shares, NAS mounts, some removable drives) will prompt for a permanent delete instead — that action cannot be undone.
+
+Before removal, the app rechecks file metadata and full-content hashes for the selected file and a retained member of its group. Changed files are blocked and require a new scan. At least one unchanged file must remain in each group. Safety-check failures never offer permanent deletion; only failed trash operations can do so, with a separate confirmation and another verification. Scans and removal operations cannot run concurrently.
+
+File checks and the final operating-system removal are separate operations, so concurrent changes by another application cannot be ruled out completely. Avoid editing or moving files while removing duplicates.
 
 ## How matching works
 
 Exact matches are grouped by file size and then hashed in parallel with BLAKE3. Files with the same size and hash are byte-for-byte identical.
 
-For supported media extensions, FFmpeg reads duration and available codec or resolution metadata. Audio and video files are grouped separately when adjacent durations fall within the selected tolerance. Files already reported as exact duplicates are excluded from likely-match groups.
+For supported media extensions, FFmpeg reads duration and available codec or resolution metadata. Audio and video files are grouped separately, with the entire duration spread of each group bounded by the selected tolerance. Duration-only groups are comparison suggestions and are excluded from the reclaimable-space total. Files already reported as exact duplicates are excluded from likely-match groups.
 
-If FFmpeg cannot initialize, exact duplicate scanning remains available and duration matching is skipped.
+If FFmpeg cannot initialize within five seconds, exact duplicate scanning remains available and duration matching is skipped. Individual probes time out after 30 seconds and appear in the scan issues. Cancellation stops active probes and is checked between filesystem operations and hash chunks; a blocked filesystem call must return before cancellation can finish.
+
+## Tests
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+python3 tests/run_frontend.py
+```
+
+Frontend tests require Chrome/Chromium (or `CHROME_BIN` pointing to it) and Python 3. They run the actual HTML and JavaScript in a headless browser with mocked Tauri commands, without touching user files. Rust regression tests cover overlapping roots, changed-file protection, retained-copy checks, partial failures, cancellation, and probe timeouts.
 
 ## Project structure
 

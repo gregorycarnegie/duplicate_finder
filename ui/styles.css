@@ -777,3 +777,12 @@ select {
   border-color: var(--danger);
   color: var(--danger);
 }
+
+#scan-warnings, #operation-errors {
+  max-height: 160px;
+  overflow: auto;
+  flex-shrink: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+#scan-warnings summary { cursor: pointer; }
