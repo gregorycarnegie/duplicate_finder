@@ -101,6 +101,7 @@ pub fn remove_paths(summary: &mut ScanSummary, removed: &HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn file(path: &str, size: u64) -> DuplicateFile {
         DuplicateFile {
@@ -154,5 +155,75 @@ mod tests {
 
         assert!(summary.exact_groups.is_empty());
         assert_eq!(summary.reclaimable_bytes, 0);
+    }
+
+    fn summary_from_group_sizes(group_sizes: &[Vec<u64>]) -> ScanSummary {
+        let mut idx = 0usize;
+        let exact_groups: Vec<DuplicateGroup> = group_sizes
+            .iter()
+            .map(|sizes| {
+                let files: Vec<DuplicateFile> = sizes
+                    .iter()
+                    .map(|&size| {
+                        let path = format!("f{idx}");
+                        idx += 1;
+                        file(&path, size)
+                    })
+                    .collect();
+                let total: u64 = sizes.iter().sum();
+                let max = sizes.iter().copied().max().unwrap_or(0);
+                DuplicateGroup {
+                    files,
+                    reclaimable_bytes: total - max,
+                }
+            })
+            .collect();
+        let reclaimable_bytes = exact_groups.iter().map(|g| g.reclaimable_bytes).sum();
+
+        ScanSummary {
+            files_scanned: idx as u64,
+            bytes_scanned: 0,
+            exact_groups,
+            media_groups: vec![],
+            reclaimable_bytes,
+            elapsed_ms: 0,
+            ffmpeg_available: false,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn remove_paths_upholds_its_invariants(
+            group_sizes in prop::collection::vec(prop::collection::vec(1u64..1_000, 2..6), 0..5),
+            removal_mask in prop::collection::vec(any::<bool>(), 0..30),
+        ) {
+            let mut summary = summary_from_group_sizes(&group_sizes);
+            let all_paths: Vec<String> = summary
+                .exact_groups
+                .iter()
+                .flat_map(|g| g.files.iter().map(|f| f.entry.path.clone()))
+                .collect();
+            let removed: HashSet<String> = all_paths
+                .iter()
+                .zip(removal_mask.iter().chain(std::iter::repeat(&false)))
+                .filter(|&(_, &r)| r)
+                .map(|(p, _)| p.clone())
+                .collect();
+
+            remove_paths(&mut summary, &removed);
+
+            let mut expected_total = 0u64;
+            for group in &summary.exact_groups {
+                prop_assert!(group.files.len() > 1);
+                for f in &group.files {
+                    prop_assert!(!removed.contains(&f.entry.path));
+                }
+                let total: u64 = group.files.iter().map(|f| f.entry.size).sum();
+                let max = group.files.iter().map(|f| f.entry.size).max().unwrap();
+                prop_assert_eq!(group.reclaimable_bytes, total - max);
+                expected_total += group.reclaimable_bytes;
+            }
+            prop_assert_eq!(summary.reclaimable_bytes, expected_total);
+        }
     }
 }

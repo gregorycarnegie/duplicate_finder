@@ -206,6 +206,7 @@ pub fn present_summary(summary: &ScanSummary) -> ScanSummaryView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn bytes_scale_to_the_right_unit() {
@@ -232,5 +233,69 @@ mod tests {
     fn millis_switch_to_seconds_past_one_thousand() {
         assert_eq!(format_ms(250), "250ms");
         assert_eq!(format_ms(1500), "1.5s");
+    }
+
+    #[test]
+    fn missing_date_is_blank() {
+        assert_eq!(format_date(None), "");
+    }
+
+    fn parse_duration_ms(s: &str) -> i64 {
+        let (rest, ms) = s.split_once('.').expect("no fractional part");
+        let ms: i64 = ms.parse().expect("non-numeric ms");
+        let parts: Vec<i64> = rest
+            .split(':')
+            .map(|p| p.parse().expect("non-numeric component"))
+            .collect();
+        let secs = match parts.as_slice() {
+            [h, m, s] => h * 3600 + m * 60 + s,
+            [m, s] => m * 60 + s,
+            _ => panic!("unexpected duration shape: {s}"),
+        };
+        secs * 1000 + ms
+    }
+
+    proptest! {
+        #[test]
+        fn bytes_never_panics_and_has_a_known_unit(n: u64) {
+            let s = format_bytes(n);
+            let parts: Vec<&str> = s.split(' ').collect();
+            prop_assert_eq!(parts.len(), 2);
+            prop_assert!(["B", "KB", "MB", "GB", "TB"].contains(&parts[1]));
+            prop_assert!(parts[0].parse::<f64>().is_ok());
+        }
+
+        #[test]
+        fn count_roundtrips_and_groups_by_three(n: u64) {
+            let s = format_count(n);
+            let digits: String = s.chars().filter(|c| *c != ',').collect();
+            prop_assert_eq!(digits.parse::<u64>().unwrap(), n);
+            let comma_count = s.chars().filter(|c| *c == ',').count();
+            prop_assert_eq!(comma_count, (digits.len() - 1) / 3);
+        }
+
+        #[test]
+        fn duration_roundtrips_to_the_millisecond(secs in 0.0f64..100_000.0) {
+            let expected = (secs * 1000.0).round() as i64;
+            prop_assert_eq!(parse_duration_ms(&format_duration(secs)), expected);
+        }
+
+        #[test]
+        fn ms_roundtrips_within_its_own_rounding(ms: u64) {
+            let s = format_ms(ms);
+            prop_assert!(!s.is_empty());
+            if let Some(digits) = s.strip_suffix("ms") {
+                prop_assert_eq!(digits.parse::<u64>().unwrap(), ms);
+            } else {
+                prop_assert!(s.ends_with('s'));
+            }
+        }
+
+        #[test]
+        fn date_never_panics_and_has_a_known_month(secs in -30_000_000_000i64..30_000_000_000i64) {
+            let s = format_date(Some(secs));
+            let month = &s[..3];
+            prop_assert!(MONTHS.contains(&month));
+        }
     }
 }
