@@ -769,6 +769,11 @@ mod tests {
     #[test]
     #[ignore = "uses the actual OS trash and restores only its own generated fixture"]
     fn native_trash_roundtrip() {
+        // GitHub's Windows runners check out to D:, which has no Recycle Bin, so
+        // the shell deletes there permanently. Stay on the system drive instead.
+        #[cfg(windows)]
+        let parent = std::path::PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
+        #[cfg(not(windows))]
         let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
         let dir = TestDir::in_dir(&parent);
         let name = format!(
