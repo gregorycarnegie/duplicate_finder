@@ -33,7 +33,7 @@ Local validation before tagging v0.6.0 passed: 54 Rust tests (5 opt-in tests ski
 | macOS | Passed unit tests, native trash/restore, and build |
 | Windows | Unit tests passed; native trash/restore failed because its generated fixture was not found in the recycle-bin listing; the subsequent build step was skipped |
 
-The Windows native-trash failure was a test bug, not a trash bug. The fixture was recycled every time, but `trash` lists Windows items by Explorer display name, which drops the extension when Explorer hides known file types (the hosted runner's default), so the test's exact-path lookup missed it. Confirmed by toggling `HideFileExt` on a runner; the test now matches on its unique fixture folder. These are results for the release commit; see [current CI runs](https://github.com/gregorycarnegie/duplicate_finder/actions/workflows/ci.yml) for later commits.
+The Windows native-trash failure was a test bug, not a trash bug. The fixture was recycled every time, but `trash` lists Windows items by Explorer display name, which drops the extension when Explorer hides known file types (the hosted runner's default), so the test's exact-path lookup missed it. Confirmed by toggling `HideFileExt` on a runner. `restore_all` has the same flaw and restores the item without its extension, so the fixture now has no extension and is matched by its unique folder. The app only calls `trash::delete`, which is unaffected. These are results for the release commit; see [current CI runs](https://github.com/gregorycarnegie/duplicate_finder/actions/workflows/ci.yml) for later commits.
 
 ## Earlier local checks — 2026-09-19
 

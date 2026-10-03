@@ -815,8 +815,10 @@ mod tests {
     fn native_trash_roundtrip() {
         let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
         let dir = TestDir::in_dir(&parent);
+        // No extension: on Windows, trash lists and restores items by display
+        // name, which drops the extension when Explorer hides known types.
         let name = format!(
-            "duplicate-finder-native-{}-{}.txt",
+            "duplicate-finder-native-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -865,9 +867,7 @@ mod tests {
         assert!(!std::path::Path::new(&path).exists());
         #[cfg(not(target_os = "macos"))]
         {
-            // Match on the folder, which is unique to this run: Windows lists
-            // items by display name, which drops the extension when Explorer
-            // hides known file types.
+            // The fixture folder is unique to this run, so this is our item.
             let listed = trash::os_limited::list().unwrap();
             let total = listed.len();
             let (items, others): (Vec<_>, Vec<_>) = listed
