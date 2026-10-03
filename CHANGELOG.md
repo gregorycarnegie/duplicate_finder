@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 - 2026-10-03
 
 - Fix the scanning screen's "files found" counter, which never updated because progress events sent `files_found` instead of `filesFound`.
 - Always deliver the final "files found" count; the progress throttle could hold it back.
 - Add IPC tests on Tauri's mock runtime and move the browser tests onto Tauri's official IPC mocks; raise the cargo-mutants score from 82% to 99% (the remainder are equivalent mutants).
+- Fix the Windows native trash/restore test, which failed wherever Explorer hides known file extensions; it runs in Windows CI again.
 - Move the Cargo workspace root to the repository root (`Cargo.lock` and `target/` now live there).
 
 ## 0.6.0 - 2026-10-03

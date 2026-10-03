@@ -1,6 +1,6 @@
 [package]
 name = "duplicate_finder"
-version = "0.6.0"
+version = "0.6.1"
 description = "Find duplicate and likely-duplicate files, including media matched by duration"
 edition = "2024"
 license = "MIT"
