@@ -1,0 +1,34 @@
+# cargo-mutants settings. Run from the repo root (the workspace root), so the
+# scratch copy includes ../ui for tauri::generate_context!.
+
+# The ignored real-media tests need ffmpeg (with Chromaprint) on PATH and are
+# what catch mutants in extract/probe. Never run the tests that use the real OS
+# trash or build 100,000-file and benchmark libraries.
+additional_cargo_test_args = [
+    "--", "--include-ignored",
+    "--skip", "native_trash_roundtrip",
+    "--skip", "large_library_scan",
+    "--skip", "benchmark_exact_duplicate_scan",
+]
+
+# Known equivalent mutants (left in, so a run shows them as missed):
+# - hashing.rs CHUNK_SIZE `*` -> `+` or `/`: only the read buffer size; the
+#   loop reads to EOF either way, so the hash is identical.
+# - hashing.rs SAMPLE_SIZE `*` -> `+`: samples only prune candidates, every
+#   sample match is fully hashed, and the whole-file threshold still exceeds
+#   one sample, so reads always fit.
+# - sample_hash `SAMPLE_SIZE * 2` -> `SAMPLE_SIZE + 2`: those files are
+#   sampled instead of hashed whole; both reads fit and any match is still
+#   fully verified, so only the work done changes.
+
+exclude_re = [
+    # Opens the native folder picker; nothing headless can answer it.
+    'pick_folders',
+    # The OS trash call and its test stub; native_trash_roundtrip covers the
+    # real one, and test builds compile only the stub.
+    'move_to_trash',
+    # Likewise the OS shell (open/reveal), which shows its own dialogs.
+    'open_in_shell',
+    # Only hands the built app to the OS event loop; app() is tested via IPC.
+    'replace main with \(\)',
+]

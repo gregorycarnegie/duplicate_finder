@@ -17,6 +17,15 @@ pub fn hash_file(path: &str) -> std::io::Result<blake3::Hash> {
     hash_file_controlled(path, &ScanControl::default())
 }
 
+/// Whether `path` still names the file `file` has open, both as stamped in
+/// `before`, so the bytes just read belong to the file that was listed.
+fn unchanged(path: &str, file: &File, before: &FileStamp) -> std::io::Result<bool> {
+    Ok(
+        FileStamp::read(path)? == *before
+            && FileStamp::from_metadata(&file.metadata()?)? == *before,
+    )
+}
+
 pub fn hash_file_controlled(path: &str, control: &ScanControl) -> std::io::Result<blake3::Hash> {
     control.check()?;
     let before = FileStamp::read(path)?;
@@ -37,9 +46,7 @@ pub fn hash_file_controlled(path: &str, control: &ScanControl) -> std::io::Resul
         }
         hasher.update(&buf[..n]);
     }
-    if FileStamp::read(path)? != before
-        || FileStamp::from_metadata(&reader.get_ref().metadata()?)? != before
-    {
+    if !unchanged(path, reader.get_ref(), &before)? {
         return Err(std::io::Error::other(
             "File changed while hashing; scan again",
         ));
@@ -71,7 +78,7 @@ fn sample_hash(
     file.seek(SeekFrom::End(-(SAMPLE_SIZE as i64)))?;
     file.read_exact(&mut sample)?;
     hasher.update(&sample);
-    if FileStamp::read(path)? != before || FileStamp::from_metadata(&file.metadata()?)? != before {
+    if !unchanged(path, &file, &before)? {
         return Err(std::io::Error::other(
             "File changed while sampling; scan again",
         ));
@@ -232,6 +239,98 @@ mod tests {
         assert_eq!(
             hash_file_controlled(&path, &control).unwrap_err().kind(),
             std::io::ErrorKind::Interrupted
+        );
+    }
+
+    #[test]
+    fn a_path_replaced_while_open_no_longer_matches_its_stamp() {
+        let dir = crate::test_support::TestDir::new();
+        let path = dir.file("target", b"original");
+        let before = FileStamp::read(&path).unwrap();
+        let file = File::open(&path).unwrap();
+        assert!(unchanged(&path, &file, &before).unwrap());
+        // The open handle still sees the stamped file; only the name moved on.
+        let replacement = dir.file("replacement", b"replacement");
+        fs::rename(&replacement, &path).unwrap();
+        assert!(!unchanged(&path, &file, &before).unwrap());
+    }
+
+    fn entry(path: String, size: u64) -> FileEntry {
+        FileEntry {
+            path,
+            size,
+            modified: None,
+        }
+    }
+
+    #[test]
+    fn only_shared_sizes_are_read_and_progress_counts_every_candidate() {
+        let dir = crate::test_support::TestDir::new();
+        let size = SAMPLE_SIZE * 3;
+        let mut content = vec![7u8; size];
+        let a = dir.file("a", &content);
+        let b = dir.file("b", &content);
+        content[0] = 8; // same size, different sample: dropped before full hashing
+        let c = dir.file("c", &content);
+        // A unique size cannot have a duplicate, so this missing file is never opened.
+        let lone = dir.0.join("lone").to_str().unwrap().to_string();
+        let entries = [
+            entry(a.clone(), size as u64),
+            entry(b.clone(), size as u64),
+            entry(c, size as u64),
+            entry(lone, 5),
+        ];
+        let control = ScanControl::default();
+        let progress = std::sync::Mutex::new(Vec::new());
+        let groups = find_exact_duplicates_controlled(
+            &entries,
+            &HashMap::new(),
+            |done, total| progress.lock().unwrap().push((done, total)),
+            &control,
+        );
+        assert!(control.warnings().is_empty(), "{:?}", control.warnings());
+        assert_eq!(groups.len(), 1);
+        let mut paths: Vec<_> = groups[0]
+            .files
+            .iter()
+            .map(|f| f.entry.path.clone())
+            .collect();
+        paths.sort();
+        assert_eq!(paths, [a, b]);
+        // The sampled-out file counts as done up front; each full hash adds one.
+        let mut progress = progress.into_inner().unwrap();
+        progress.sort();
+        assert_eq!(progress, [(1, 3), (2, 3), (3, 3)]);
+    }
+
+    #[test]
+    fn reclaimable_bytes_count_every_copy_but_one() {
+        let dir = crate::test_support::TestDir::new();
+        let entries: Vec<_> = ["x", "y", "z"]
+            .map(|name| entry(dir.file(name, b"seven!!"), 7))
+            .to_vec();
+        let groups = find_exact_duplicates(&entries, &HashMap::new(), |_, _| {});
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].reclaimable_bytes, 14);
+    }
+
+    #[test]
+    fn files_shorter_than_two_samples_are_hashed_whole() {
+        let dir = crate::test_support::TestDir::new();
+        // Shorter than one sample, so sampling would fail to read it.
+        let content = vec![3u8; SAMPLE_SIZE * 5 / 8];
+        let entries: Vec<_> = ["p", "q"]
+            .map(|name| entry(dir.file(name, &content), content.len() as u64))
+            .to_vec();
+        let control = ScanControl::default();
+        let groups =
+            find_exact_duplicates_controlled(&entries, &HashMap::new(), |_, _| {}, &control);
+        assert!(control.warnings().is_empty(), "{:?}", control.warnings());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            control.hashes.lock().unwrap().len(),
+            2,
+            "whole-file hashes are cached"
         );
     }
 

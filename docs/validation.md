@@ -2,6 +2,25 @@
 
 This records local and CI checks and their limits. It is not a claim that the app is production-ready on every platform.
 
+## Test-suite and mutation-testing pass — 2026-10-03
+
+Environment: Windows 11, Rust 1.99.0, FFmpeg 8.1.2 (with Chromaprint), Chrome, debug/test builds.
+
+| Check | Result | Scope |
+| --- | --- | --- |
+| Rust default suite | 95 passed, 7 opt-in tests skipped | Adds IPC tests on Tauri's mock runtime (`src-tauri/src/ipc_tests.rs`): every UI command invoked with the JSON `ui/app.js` sends, checked against the fields the UI reads |
+| Real media tests (`tests::real_`) | 4 passed | Adds a probe test that reads the requested stream from a file holding both video and audio |
+| Browser suite | 19 passed | Now loads Tauri's own JS API and dialog plugin at the `Cargo.lock` versions and uses Tauri's official `mockIPC`/`mockWindows`, instead of a hand-written `window.__TAURI__` stub; adds progress events, drag-drop, context menu, play/open, titlebar and folder-list tests |
+| Mutation testing (cargo-mutants 27.1.0) | 381 caught, 4 missed, 0 timeouts (99%) | Up from 82.4% before this pass; the 4 survivors are equivalent mutants, with reasons recorded in `.cargo/mutants.toml` |
+| Clippy, rustfmt and application build | Passed | All targets, warnings denied |
+
+Bugs found and fixed:
+
+- Scan progress sent `files_found` while the UI reads `filesFound`, so the scanning screen's "files found" counter threw on every walking event and never updated (present since the initial commit). Found by the IPC progress test.
+- The progress throttle could drop the final walking count when the walk ended within 100 ms of the previous event, leaving the counter at the last multiple of 100. Found by a surviving mutant.
+
+Test builds now stub the OS trash and the shell's open/reveal, so neither tests nor mutants can fill the real trash or pop shell dialogs. `native_trash_roundtrip` still covers the real trash call. Fingerprint partitioning, Chromaprint parsing and sample timing moved into pure functions so they can be tested without FFmpeg; property tests check that the ffprobe, frame and Chromaprint parsers never panic on arbitrary output. The ffprobe parser is also pinned to output captured from a real ffprobe 8.1.2.
+
 ## v0.6.0 release checks — 2026-10-03
 
 Local validation before tagging v0.6.0 passed: 54 Rust tests (5 opt-in tests skipped), 12 browser tests, Clippy with warnings denied, and the application build. The new regressions cover optional content verification for both trash and permanent deletion, including retained metadata checks.
@@ -59,10 +78,13 @@ cargo build --manifest-path src-tauri/Cargo.toml --locked
 python3 tests/run_frontend.py
 cargo test --manifest-path src-tauri/Cargo.toml --locked large_library_scan -- --ignored --nocapture
 cargo test --manifest-path src-tauri/Cargo.toml --locked benchmark_exact_duplicate_scan -- --ignored --nocapture
-cargo test --manifest-path src-tauri/Cargo.toml --locked fingerprint::tests::real_ -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --locked tests::real_ -- --ignored --nocapture
 cargo test --manifest-path src-tauri/Cargo.toml --locked native_trash_roundtrip -- --ignored --nocapture
 python3 tests/smoke_desktop.py
+cargo mutants -j4    # from the repo root; settings in .cargo/mutants.toml
 ```
+
+The browser suite finds Chrome or Chromium on `PATH`, or takes `CHROME_BIN`. A mutation run takes about 15 minutes on a 32-thread machine and needs FFmpeg with Chromaprint, because it includes the real-media tests.
 
 `DUPLICATE_FINDER_STRESS_FILES` can override the scale fixture count (at least 100, divisible by 100). Native trash tests touch only their uniquely named generated fixtures. The native startup script requires Linux, Xvfb, and `dbus-run-session`. Real audio tests require FFmpeg with Chromaprint and MP3 encoding support.
 

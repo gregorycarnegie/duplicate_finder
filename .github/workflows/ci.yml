@@ -27,7 +27,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: ". -> target"
 
       - name: Test
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
@@ -37,7 +37,7 @@ jobs:
 
       - name: Real media reencoding tests
         if: runner.os == 'Linux'
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml fingerprint::tests::real_ -- --ignored --nocapture
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml tests::real_ -- --ignored --nocapture
 
       - name: Frontend regression tests
         if: runner.os == 'Linux'

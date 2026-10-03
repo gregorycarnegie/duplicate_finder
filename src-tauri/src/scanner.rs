@@ -175,6 +175,32 @@ mod tests {
     }
 
     #[test]
+    fn progress_comes_every_hundred_files_and_after_each_folder() {
+        let dir = crate::test_support::TestDir::new();
+        fs::create_dir(dir.0.join("second")).unwrap();
+        for i in 0..230 {
+            dir.file(&i.to_string(), b"data");
+        }
+        dir.file("second/extra", b"data");
+        let first = dir.0.to_str().unwrap().to_string();
+        let second = dir.0.join("second").to_str().unwrap().to_string();
+        let mut calls = Vec::new();
+        // The first root's walk also finds second/extra.
+        walk_folders(&[first.clone(), second.clone()], true, 0, |folder, n| {
+            calls.push((folder.to_string(), n))
+        });
+        assert_eq!(
+            calls,
+            [
+                (first.clone(), 100),
+                (first.clone(), 200),
+                (first, 231),
+                (second, 231)
+            ]
+        );
+    }
+
+    #[test]
     fn cancellation_interrupts_walking() {
         let dir = crate::test_support::TestDir::new();
         for i in 0..110 {
@@ -226,11 +252,12 @@ mod tests {
         let root = setup("scanner-test-min-size");
         fs::write(root.join("small.bin"), vec![0u8; 10]).unwrap();
         fs::write(root.join("big.bin"), vec![0u8; 100]).unwrap();
+        fs::write(root.join("exact.bin"), vec![0u8; 50]).unwrap();
 
         let folder = root.to_string_lossy().to_string();
         let entries = walk_folders(&[folder], true, 50, |_, _| {});
 
-        assert_eq!(names_of(&entries), vec!["big.bin"]);
+        assert_eq!(names_of(&entries), vec!["big.bin", "exact.bin"]);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -118,7 +118,7 @@ cd src-tauri
 cargo tauri build
 ```
 
-Generated bundles are written below `src-tauri/target/release/bundle/`.
+Generated bundles are written below `target/release/bundle/`.
 
 ## Usage
 

@@ -10,7 +10,7 @@ use std::{
     sync::{Mutex, atomic::Ordering},
     time::Instant,
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 pub type ScannedFiles = Mutex<HashMap<String, FileSnapshot>>;
 pub type PermanentCandidates = Mutex<HashSet<String>>;
@@ -20,7 +20,7 @@ fn all_scanned(scanned: &HashMap<String, FileSnapshot>, paths: &[String]) -> boo
     paths.iter().all(|path| scanned.contains_key(path))
 }
 
-fn require_scanned(app: &AppHandle, paths: &[String]) -> Result<(), String> {
+fn require_scanned<R: Runtime>(app: &AppHandle<R>, paths: &[String]) -> Result<(), String> {
     let scanned = app.state::<ScannedFiles>();
     let scanned = scanned.lock().map_err(|e| e.to_string())?;
     all_scanned(&scanned, paths)
@@ -29,7 +29,7 @@ fn require_scanned(app: &AppHandle, paths: &[String]) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn pick_folders(app: AppHandle) -> Result<Vec<String>, String> {
+pub async fn pick_folders<R: Runtime>(app: AppHandle<R>) -> Result<Vec<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let folders = app.dialog().file().blocking_pick_folders();
     Ok(folders
@@ -48,33 +48,51 @@ pub fn folders_from_paths(paths: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-#[tauri::command]
-pub fn open_file(app: AppHandle, path: String) -> Result<(), String> {
+#[cfg(not(test))]
+fn open_in_shell<R: Runtime>(app: &AppHandle<R>, path: String, reveal: bool) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    require_scanned(&app, std::slice::from_ref(&path))?;
-    app.opener()
-        .open_path(path, None::<&str>)
-        .map_err(|e| e.to_string())
+    let opener = app.opener();
+    if reveal {
+        opener.reveal_item_in_dir(path)
+    } else {
+        opener.open_path(path, None::<&str>)
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// The OS shell shows its own dialogs, even for a missing path, so no test or
+/// mutant may reach it.
+#[cfg(test)]
+fn open_in_shell<R: Runtime>(_: &AppHandle<R>, path: String, reveal: bool) -> Result<(), String> {
+    Err(format!(
+        "Shell unavailable in tests: reveal={reveal} {path}"
+    ))
 }
 
 #[tauri::command]
-pub fn reveal_file(app: AppHandle, path: String) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
+pub fn open_file<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
     require_scanned(&app, std::slice::from_ref(&path))?;
-    app.opener()
-        .reveal_item_in_dir(path)
-        .map_err(|e| e.to_string())
+    open_in_shell(&app, path, false)
 }
 
 #[tauri::command]
-pub fn cancel_scan(app: AppHandle) {
+pub fn reveal_file<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
+    require_scanned(&app, std::slice::from_ref(&path))?;
+    open_in_shell(&app, path, true)
+}
+
+#[tauri::command]
+pub fn cancel_scan<R: Runtime>(app: AppHandle<R>) {
     app.state::<Operations>()
         .cancelled
         .store(true, Ordering::SeqCst);
 }
 
 #[tauri::command]
-pub async fn scan(app: AppHandle, options: ScanOptions) -> Result<ScanSummaryView, String> {
+pub async fn scan<R: Runtime>(
+    app: AppHandle<R>,
+    options: ScanOptions,
+) -> Result<ScanSummaryView, String> {
     let operations = app.state::<Operations>();
     let guard = operations.begin()?;
     let control = ScanControl {
@@ -109,8 +127,8 @@ pub async fn scan(app: AppHandle, options: ScanOptions) -> Result<ScanSummaryVie
     .map_err(|e| e.to_string())?
 }
 
-fn run_scan(
-    app: &AppHandle,
+fn run_scan<R: Runtime>(
+    app: &AppHandle<R>,
     options: ScanOptions,
     control: &ScanControl,
 ) -> Result<(ScanSummary, HashMap<String, FileSnapshot>), String> {
@@ -149,6 +167,20 @@ fn run_scan(
         control,
     )
     .map_err(|e| e.to_string())?;
+    // Walking has no total, so the throttle may have held back the final
+    // count; offer it as a completion, which passes unless already shown.
+    let found = entries.len() as u64;
+    if let Some(folder) = options.folders.last()
+        && gate.allow("walking", found, found)
+    {
+        let _ = app.emit(
+            "scan-progress",
+            ScanProgress::Walking {
+                folder: folder.clone(),
+                files_found: found,
+            },
+        );
+    }
     let ffmpeg_available = media::init(control);
     control.check().map_err(|e| e.to_string())?;
     let media_lookup = if ffmpeg_available {
@@ -390,8 +422,20 @@ fn remove_checked_with_verifier<
     (removed, failures)
 }
 
-async fn remove_files(
-    app: AppHandle,
+#[cfg(not(test))]
+fn move_to_trash(path: &str) -> Result<(), String> {
+    trash::delete(path).map_err(|e| e.to_string())
+}
+
+/// Tests see a platform without a trash, so no test or mutant can fill the
+/// real one; `native_trash_roundtrip` covers the OS call itself.
+#[cfg(test)]
+fn move_to_trash(_path: &str) -> Result<(), String> {
+    Err("Trash is unavailable in tests".into())
+}
+
+async fn remove_files<R: Runtime>(
+    app: AppHandle<R>,
     paths: Vec<String>,
     permanent: bool,
     verify_contents: bool,
@@ -438,7 +482,7 @@ async fn remove_files(
                 if permanent {
                     std::fs::remove_file(path).map_err(|e| e.to_string())
                 } else {
-                    trash::delete(path).map_err(|e| e.to_string())
+                    move_to_trash(path)
                 }
             },
         );
@@ -472,8 +516,8 @@ async fn remove_files(
 }
 
 #[tauri::command]
-pub async fn trash_files(
-    app: AppHandle,
+pub async fn trash_files<R: Runtime>(
+    app: AppHandle<R>,
     paths: Vec<String>,
     verify_contents: Option<bool>,
 ) -> Result<TrashResult, String> {
@@ -481,8 +525,8 @@ pub async fn trash_files(
 }
 
 #[tauri::command]
-pub async fn delete_files_permanently(
-    app: AppHandle,
+pub async fn delete_files_permanently<R: Runtime>(
+    app: AppHandle<R>,
     paths: Vec<String>,
     verify_contents: Option<bool>,
 ) -> Result<TrashResult, String> {
@@ -827,15 +871,23 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         {
             let expected = std::path::PathBuf::from(&path);
-            let items: Vec<_> = trash::os_limited::list()
-                .unwrap()
+            let listed = trash::os_limited::list().unwrap();
+            let total = listed.len();
+            let (items, others): (Vec<_>, Vec<_>) = listed
                 .into_iter()
-                .filter(|item| item.original_path() == expected)
+                .partition(|item| item.original_path() == expected);
+            // Same name under another path means a path-form mismatch; no
+            // entry at all means the delete bypassed the trash.
+            let same_name: Vec<_> = others
+                .iter()
+                .filter(|item| item.name == name.as_str())
+                .map(|item| item.original_path())
                 .collect();
             assert_eq!(
                 items.len(),
                 1,
-                "generated fixture not found in native trash"
+                "generated fixture not found in native trash: expected {expected:?}; \
+                 {total} items listed; same name at {same_name:?}"
             );
             trash::os_limited::restore_all(items).unwrap();
         }

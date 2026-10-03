@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fix the scanning screen's "files found" counter, which never updated because progress events sent `files_found` instead of `filesFound`.
+- Always deliver the final "files found" count; the progress throttle could hold it back.
+- Add IPC tests on Tauri's mock runtime and move the browser tests onto Tauri's official IPC mocks; raise the cargo-mutants score from 82% to 99% (the remainder are equivalent mutants).
+- Move the Cargo workspace root to the repository root (`Cargo.lock` and `target/` now live there).
+
 ## 0.6.0 - 2026-10-03
 
 - Make full-content verification before trash/permanent removal optional and off by default; retain metadata and retained-copy checks.

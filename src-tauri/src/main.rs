@@ -3,6 +3,8 @@
 mod commands;
 mod fingerprint;
 mod hashing;
+#[cfg(test)]
+mod ipc_tests;
 mod media;
 mod model;
 mod present;
@@ -11,8 +13,10 @@ mod scanner;
 #[cfg(test)]
 mod test_support;
 
-fn main() {
-    tauri::Builder::default()
+/// Everything but the context, so IPC tests drive the same state, plugins and
+/// command list as the shipped app.
+fn app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder
         .manage(commands::ScannedFiles::default())
         .manage(scan_control::Operations::default())
         .manage(commands::LastSummary::default())
@@ -29,6 +33,10 @@ fn main() {
             commands::trash_files,
             commands::delete_files_permanently,
         ])
+}
+
+fn main() {
+    app(tauri::Builder::default())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

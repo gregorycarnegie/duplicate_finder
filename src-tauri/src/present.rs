@@ -250,6 +250,115 @@ mod tests {
         assert_eq!(format_date(None), "");
     }
 
+    #[test]
+    fn millis_at_exactly_one_second_switch_to_seconds() {
+        assert_eq!(format_ms(999), "999ms");
+        assert_eq!(format_ms(1000), "1.0s");
+    }
+
+    #[test]
+    fn days_map_to_the_proleptic_gregorian_calendar() {
+        // Day counts from Python's datetime; year 0 (a leap year) and earlier
+        // follow the same proleptic calendar.
+        for (days, date) in [
+            (0, (1970, 1, 1)),
+            (-1, (1969, 12, 31)),
+            (58, (1970, 2, 28)),
+            (59, (1970, 3, 1)),
+            (789, (1972, 2, 29)),
+            (10957, (2000, 1, 1)),
+            (11016, (2000, 2, 29)),
+            (11017, (2000, 3, 1)),
+            (11322, (2000, 12, 31)),
+            (-25509, (1900, 2, 28)),
+            (-25508, (1900, 3, 1)),
+            (47540, (2100, 2, 28)),
+            (47541, (2100, 3, 1)),
+            (-135081, (1600, 2, 29)),
+            (-134774, (1601, 1, 1)),
+            (-719162, (1, 1, 1)),
+            (2932896, (9999, 12, 31)),
+            (-719468, (0, 3, 1)),
+            (-719469, (0, 2, 29)),
+            (-719528, (0, 1, 1)),
+            (-719529, (-1, 12, 31)),
+        ] {
+            assert_eq!(civil_from_days(days), date, "day {days}");
+        }
+    }
+
+    #[test]
+    fn dates_show_the_year_only_outside_the_current_one() {
+        assert_eq!(format_date(Some(0)), "Jan 1, 1970");
+        assert_eq!(format_date(Some(-1)), "Dec 31, 1969");
+        assert_eq!(format_date(Some(11016 * 86400 + 86399)), "Feb 29, 2000");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let today = format_date(Some(now));
+        assert!(!today.contains(','), "{today}");
+    }
+
+    fn media_file(
+        duration_secs: f64,
+        dims: Option<(u32, u32)>,
+        codec: Option<&str>,
+    ) -> DuplicateFile {
+        DuplicateFile {
+            entry: crate::model::FileEntry {
+                path: "clip".into(),
+                size: 10,
+                modified: Some(0),
+            },
+            media: Some(MediaInfo {
+                kind: crate::model::MediaKind::Video,
+                duration_secs,
+                width: dims.map(|d| d.0),
+                height: dims.map(|d| d.1),
+                codec: codec.map(Into::into),
+            }),
+        }
+    }
+
+    #[test]
+    fn media_rows_show_dimensions_codec_and_duration_instead_of_a_date() {
+        let full = present_file(&media_file(65.25, Some((1920, 1080)), Some("h264")));
+        assert_eq!(full.detail_text, "1920\u{d7}1080 H264 1:05.250");
+        assert!(full.playable);
+        let bare = present_file(&media_file(3.5, None, None));
+        assert_eq!(bare.detail_text, "0:03.500");
+        let mut width_only = media_file(3.5, Some((640, 480)), None);
+        width_only.media.as_mut().unwrap().height = None;
+        assert_eq!(present_file(&width_only).detail_text, "0:03.500");
+    }
+
+    #[test]
+    fn media_groups_explain_their_evidence_and_duration_spread() {
+        for (evidence, text) in [
+            (MatchEvidence::Duration, "duration only"),
+            (MatchEvidence::VideoFrames, "sampled video frames match"),
+            (
+                MatchEvidence::AudioFingerprint,
+                "sampled audio fingerprints match",
+            ),
+        ] {
+            let group = DuplicateGroup {
+                evidence,
+                files: [11.25, 10.0, 10.5]
+                    .map(|d| media_file(d, None, None))
+                    .to_vec(),
+                reclaimable_bytes: 20,
+            };
+            let view = present_group(&group, GroupKind::Media);
+            assert_eq!(
+                view.header_left,
+                format!("3 files \u{b7} {text} \u{b7} spread 1.25s")
+            );
+            assert_eq!(view.header_right, "Compare content before removing");
+        }
+    }
+
     fn parse_duration_ms(s: &str) -> i64 {
         let (rest, ms) = s.split_once('.').expect("no fractional part");
         let ms: i64 = ms.parse().expect("non-numeric ms");

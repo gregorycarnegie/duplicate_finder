@@ -295,6 +295,57 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    // Captured from ffprobe 8.1.2 with probe()'s arguments, for an H.264 MP4
+    // and an MP3. Note the extra keys, padded durations and absent dimensions.
+    const REAL_VIDEO_PROBE: &str = r#"{
+    "programs": [
+
+    ],
+    "stream_groups": [
+
+    ],
+    "streams": [
+        {
+            "codec_name": "h264",
+            "width": 320,
+            "height": 240
+        }
+    ],
+    "format": {
+        "duration": "3.000000"
+    }
+}"#;
+    const REAL_AUDIO_PROBE: &str = r#"{
+    "programs": [
+
+    ],
+    "stream_groups": [
+
+    ],
+    "streams": [
+        {
+            "codec_name": "mp3"
+        }
+    ],
+    "format": {
+        "duration": "2.500000"
+    }
+}"#;
+
+    #[test]
+    fn parses_real_ffprobe_output() {
+        let video = parse_probe(REAL_VIDEO_PROBE.as_bytes(), MediaKind::Video).unwrap();
+        assert!(matches!(video.kind, MediaKind::Video));
+        assert_eq!(video.duration_secs, 3.0);
+        assert_eq!((video.width, video.height), (Some(320), Some(240)));
+        assert_eq!(video.codec.as_deref(), Some("h264"));
+        let audio = parse_probe(REAL_AUDIO_PROBE.as_bytes(), MediaKind::Audio).unwrap();
+        assert!(matches!(audio.kind, MediaKind::Audio));
+        assert_eq!(audio.duration_secs, 2.5);
+        assert_eq!((audio.width, audio.height), (None, None));
+        assert_eq!(audio.codec.as_deref(), Some("mp3"));
+    }
+
     #[test]
     fn parses_ffprobe_output() {
         let info = parse_probe(
@@ -407,21 +458,45 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    /// A shell command: `unix` under sh, `windows` under PowerShell.
+    fn shell(unix: &str, windows: &str) -> Command {
+        let mut command;
+        if cfg!(windows) {
+            command = Command::new("powershell");
+            command.args(["-NoProfile", "-NonInteractive", "-Command", windows]);
+        } else {
+            command = Command::new("sh");
+            command.args(["-c", unix]);
+        }
+        command
+    }
+
+    fn output_of(bytes: usize) -> Command {
+        shell(
+            &format!("head -c {bytes} /dev/zero"),
+            &format!(
+                "$o = [Console]::OpenStandardOutput(); $o.Write((New-Object byte[] {bytes}), 0, {bytes})"
+            ),
+        )
+    }
+
+    fn sleeper() -> Command {
+        shell("exec sleep 10", "Start-Sleep 10")
+    }
+
     #[test]
     fn stalled_process_is_killed_on_timeout() {
         let start = Instant::now();
         let error = run_command(
-            Command::new("sh").args(["-c", "exec sleep 10"]),
+            &mut sleeper(),
             &ScanControl::default(),
             Duration::from_millis(60),
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
-    #[cfg(unix)]
     #[test]
     fn cancellation_kills_a_running_process() {
         let control = ScanControl::default();
@@ -431,30 +506,148 @@ mod tests {
             cancel.store(true, Ordering::SeqCst);
         });
         let start = Instant::now();
-        let error = run_command(
-            Command::new("sh").args(["-c", "exec sleep 10"]),
-            &control,
-            Duration::from_secs(5),
-        )
-        .unwrap_err();
+        let error = run_command(&mut sleeper(), &control, Duration::from_secs(30)).unwrap_err();
         thread.join().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
-        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
-    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_scan_starts_no_process() {
+        let control = ScanControl::default();
+        control.cancelled.store(true, Ordering::SeqCst);
+        assert!(!init(&control), "FFmpeg reported available without a check");
+        let error = run_command(
+            &mut Command::new("does-not-exist"),
+            &control,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    }
+
     #[test]
     fn child_output_larger_than_a_pipe_does_not_deadlock() {
         let result = run_command(
-            Command::new("sh").args(["-c", "head -c 100000 /dev/zero"]),
+            &mut output_of(100_000),
             &ScanControl::default(),
-            Duration::from_secs(2),
+            Duration::from_secs(30),
         )
         .unwrap();
-        assert_eq!(result.len(), 100000);
+        assert_eq!(result.len(), 100_000);
+    }
+
+    #[test]
+    fn output_is_capped_at_one_mebibyte() {
+        let limit = 1024 * 1024;
+        let control = ScanControl::default();
+        let at_limit =
+            run_command(&mut output_of(limit), &control, Duration::from_secs(30)).unwrap();
+        assert_eq!(at_limit.len(), limit);
+        let error =
+            run_command(&mut output_of(limit + 1), &control, Duration::from_secs(30)).unwrap_err();
+        assert_eq!(error.to_string(), "Media process output exceeded limit");
+    }
+
+    #[test]
+    fn a_failing_process_is_an_error_even_with_output() {
+        let error = run_command(
+            &mut shell("echo partial; exit 3", "Write-Output partial; exit 3"),
+            &ScanControl::default(),
+            Duration::from_secs(30),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().starts_with("Media process failed"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn probing_skips_other_files_and_reports_each_failed_probe() {
+        let entries = [entry("notes.txt", 1), entry("missing/clip.mp4", 1)];
+        let control = ScanControl::default();
+        let progress = std::sync::Mutex::new(Vec::new());
+        let found = probe_all(
+            &entries,
+            |done, total| progress.lock().unwrap().push((done, total)),
+            &control,
+        );
+        assert!(found.is_empty());
+        assert_eq!(progress.into_inner().unwrap(), [(1, 1)]);
+        let warnings = control.warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].starts_with("missing/clip.mp4: "),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn media_kind_comes_from_the_extension_in_any_case() {
+        assert!(matches!(media_kind_for("a/b.MKV"), Some(MediaKind::Video)));
+        assert!(matches!(
+            media_kind_for("song.Flac"),
+            Some(MediaKind::Audio)
+        ));
+        assert!(media_kind_for("mp4").is_none());
+        assert!(media_kind_for("notes.txt").is_none());
+    }
+
+    #[test]
+    #[ignore = "requires ffmpeg"]
+    fn real_probe_reads_the_stream_for_the_requested_kind() {
+        let dir = crate::test_support::TestDir::new();
+        let path = dir.0.join("both.mkv").to_str().unwrap().to_string();
+        let control = ScanControl::default();
+        run_command(
+            media_command("ffmpeg").args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=96x64:rate=5:duration=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-c:v",
+                "ffv1",
+                "-c:a",
+                "flac",
+                &path,
+            ]),
+            &control,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(init(&control));
+        let video = probe(&path, MediaKind::Video, &control).unwrap();
+        assert_eq!(
+            (video.codec.as_deref(), video.width, video.height),
+            (Some("ffv1"), Some(96), Some(64))
+        );
+        let audio = probe(&path, MediaKind::Audio, &control).unwrap();
+        assert_eq!((audio.codec.as_deref(), audio.width), (Some("flac"), None));
+        assert!((audio.duration_secs - 2.0).abs() < 0.1);
     }
 
     proptest! {
+        #[test]
+        fn probe_parsing_never_panics_on_arbitrary_output(
+            bytes in prop::collection::vec(any::<u8>(), 0..200),
+            duration in ".{0,12}",
+        ) {
+            let _ = parse_probe(&bytes, MediaKind::Video);
+            let json = serde_json::json!({ "format": { "duration": duration }, "streams": [] });
+            if let Some(info) = parse_probe(json.to_string().as_bytes(), MediaKind::Audio) {
+                prop_assert!(info.duration_secs.is_finite() && info.duration_secs > 0.0);
+            }
+        }
+
         #[test]
         fn clusters_stay_within_tolerance_and_never_reuse_a_file(
             durations in prop::collection::vec(0.0f64..1000.0, 0..12),

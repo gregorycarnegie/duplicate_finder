@@ -17,3 +17,6 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# cargo-mutants output
+mutants.out*/

@@ -10,34 +10,31 @@ async function until(predicate) {
   for (let i = 0; i < 100; i++) { if (predicate()) return; await tick(); }
   throw new Error("Timed out waiting for UI state");
 }
+// Runs inside the app frame after Tauri's own JS API has loaded. Commands go
+// through the official mockIPC; events through its event mock, so listen,
+// emit and unlisten behave as the real event plugin's IPC does.
 function mockTauri() {
-  const t = window.__test = { calls: [], confirmations: [], handlers: {}, errors: [], unlistened: 0 };
+  const t = window.__test = { calls: [], confirmations: [], handlers: {}, errors: [], menus: [] };
   addEventListener("error", (e) => t.errors.push(e.message));
   addEventListener("unhandledrejection", (e) => t.errors.push(String(e.reason)));
-  const appWindow = {
-    isMaximized: async () => false, onResized: async () => {},
-    minimize: async () => {}, toggleMaximize: async () => {}, close: async () => {},
-  };
-  window.__TAURI__ = {
-    core: { invoke: async (name, args) => {
-      t.calls.push({ name, args });
-      if (t.handlers[name]) return t.handlers[name](args);
-      if (name === "pick_folders") return ["/test"];
-      throw new Error(`Unexpected command: ${name}`);
-    } },
-    event: { listen: async (_, callback) => {
-      if (t.listenError) throw new Error(t.listenError);
-      t.progress = callback;
-      return () => { t.unlistened++; };
-    } },
-    window: { getCurrentWindow: () => appWindow },
-    webview: { getCurrentWebview: () => ({ onDragDropEvent: async () => {} }) },
-    menu: { Menu: { new: async () => ({ popup: async () => {} }) }, MenuItem: { new: async () => ({ setText: async () => {} }) } },
-    dialog: { confirm: async (message) => {
-      t.confirmations.push(message);
-      return t.confirm ? t.confirm(message) : true;
-    } },
-  };
+  const { mockIPC, mockWindows } = window.__TAURI__.mocks;
+  mockWindows("main");
+  let rid = 0;
+  mockIPC((name, args) => {
+    t.calls.push({ name, args });
+    if (t.handlers[name]) return t.handlers[name](args);
+    switch (name) {
+      case "pick_folders": return ["/test"];
+      case "plugin:window|is_maximized": return false;
+      case "plugin:window|minimize": case "plugin:window|toggle_maximize": case "plugin:window|close":
+      case "plugin:menu|popup": case "plugin:menu|set_text": return null;
+      case "plugin:menu|new": t.menus.push(args); return [++rid, `menu-${rid}`];
+      case "plugin:dialog|message": // what dialog.confirm() sends
+        t.confirmations.push(args.message);
+        return (t.confirm ? t.confirm(args.message) : true) ? "Ok" : "Cancel";
+    }
+    throw new Error(`Unexpected command: ${name}`);
+  }, { shouldMockEvents: true });
 }
 function summary(count = 3) {
   return {
@@ -51,7 +48,9 @@ async function fixture() {
   iframe.style = "width:1180px;height:780px";
   const html = await (await fetch("/ui/index.html")).text();
   const loaded = new Promise((resolve) => iframe.onload = resolve);
-  iframe.srcdoc = html.replace("<head>", `<head><base href="/ui/"><script>(${mockTauri.toString()})();<\/script>`);
+  iframe.srcdoc = html.replace("<head>", `<head><base href="/ui/">` +
+    `<script src="/vendor/tauri.js"><\/script><script src="/vendor/dialog.js"><\/script>` +
+    `<script>(${mockTauri.toString()})();<\/script>`);
   document.body.append(iframe);
   await loaded;
   const win = iframe.contentWindow;
@@ -59,6 +58,8 @@ async function fixture() {
   const t = win.__test;
   assert(t, "Mock Tauri failed to load");
   const el = (id) => doc.getElementById(id);
+  // Startup registers the resize and drag-drop listeners before anything else.
+  await until(() => t.menus.length === 2);
   el("btn-add-folder").click();
   await until(() => !el("btn-start-scan").disabled);
   async function scan(value = summary()) {
@@ -67,19 +68,59 @@ async function fixture() {
     await until(() => doc.body.dataset.screen === "results");
   }
   const select = (index) => doc.querySelectorAll(".dupe-file input")[index].click();
-  return { win, doc, t, el, scan, select };
+  const emit = (event, payload) => win.__TAURI__.event.emit(event, payload);
+  const calls = (name) => t.calls.filter((c) => c.name === name);
+  // Delivers a channel message the way the runtime does for a clicked menu item.
+  const fire = (handler) => win.__TAURI_INTERNALS__.runCallback(handler.id, { index: handler.sent = (handler.sent ?? -1) + 1, message: "clicked" });
+  return { win, doc, t, el, scan, select, emit, calls, fire };
 }
 const tests = [
-  ["content comparison option reaches the backend", async () => {
-    const { scan, el, t } = await fixture();
+  ["scan options reach the backend as the user set them", async () => {
+    const { scan, el, t, win } = await fixture();
     el("compare-media").checked = true;
+    el("include-hidden").checked = true;
+    el("min-size").value = "102400";
+    el("tolerance").value = "2.3";
+    el("tolerance").dispatchEvent(new win.Event("input"));
+    assert(el("tolerance-readout").textContent === "2.3s maximum spread", "Tolerance readout stale");
     await scan();
-    assert(t.calls.find((c) => c.name === "scan").args.options.compareMediaContent === true, "Content comparison option lost");
+    const { options } = t.calls.find((c) => c.name === "scan").args;
+    assert(JSON.stringify(options) === JSON.stringify({
+      folders: ["/test"], durationToleranceSecs: 2.3, minFileSize: 102400, includeHidden: true, compareMediaContent: true,
+    }), `Unexpected scan options ${JSON.stringify(options)}`);
+  }],
+  ["progress events update the scanning screen", async () => {
+    const { t, el, doc, emit } = await fixture();
+    let finish;
+    t.handlers.scan = () => new Promise((resolve) => finish = resolve);
+    el("btn-start-scan").click();
+    await until(() => finish);
+    await emit("scan-progress", { phase: "walking", folder: "/test", filesFound: 1234 });
+    await emit("scan-progress", { phase: "walking", folder: "/test", filesFound: 1300 });
+    await emit("scan-progress", { phase: "probing", done: 1, total: 4 });
+    assert(el("scan-rail-fill").style.width === "10%", `Probing rail ${el("scan-rail-fill").style.width}`);
+    await emit("scan-progress", { phase: "hashing", done: 1, total: 4 });
+    assert(el("scan-rail-fill").style.width === "50%", `Hashing rail ${el("scan-rail-fill").style.width}`);
+    await emit("scan-progress", { phase: "comparing", done: 0, total: 4 });
+    await emit("scan-progress", { phase: "verifying", done: 1, total: 2 });
+    assert(el("stat-files").textContent === "1,300", "Files found not shown");
+    assert(el("stat-probed").textContent === "1", "Probed count not shown");
+    assert(el("stat-hashed").textContent === "1", "Hashed count not shown");
+    assert(el("scan-rail-fill").style.width === "95%", `Verifying rail ${el("scan-rail-fill").style.width}`);
+    const log = el("scan-log").textContent;
+    assert(log.split("walking /test").length === 2, "Folder logged more than once");
+    for (const line of ["probing media durations", "hashing candidates", "comparing sampled media content", "verifying result files"]) {
+      assert(log.includes(line), `Missing log line: ${line}`);
+    }
+    finish(summary());
+    await until(() => doc.body.dataset.screen === "results");
+    assert(el("scan-rail-fill").style.width === "100%", "Rail not completed");
+    await emit("scan-progress", { phase: "walking", folder: "/late", filesFound: 9 });
+    assert(el("stat-files").textContent === "1,300", "Progress listener outlived the scan");
   }],
   ["100,000 result files render in bounded pages and retain selection", async () => {
-    const { scan, el, select, doc, win } = await fixture();
-    const value = summary(100000);
-    await scan(value);
+    const { scan, el, select, doc } = await fixture();
+    await scan(summary(100000));
     assert(doc.querySelectorAll(".dupe-file").length === 50, "Entire large group rendered eagerly");
     select(0);
     el("exact-groups").querySelector(".result-more").click();
@@ -117,7 +158,7 @@ const tests = [
     assert(!win.injected && !el("scan-warning-list").querySelector("img"), "Warning interpreted as HTML");
   }],
   ["cancel interrupts scanning and removes progress listener", async () => {
-    const { t, el, doc } = await fixture();
+    const { t, el, doc, emit } = await fixture();
     let rejectScan;
     t.handlers.scan = () => new Promise((_, reject) => rejectScan = reject);
     t.handlers.cancel_scan = () => rejectScan("Scan cancelled.");
@@ -126,15 +167,97 @@ const tests = [
     el("btn-cancel-scan").click();
     await until(() => doc.body.dataset.screen === "setup");
     assert(el("setup-note").textContent === "Scan cancelled.", "Missing cancellation status");
-    assert(t.unlistened === 1, "Listener leaked");
+    assert(el("toast").hidden, "Cancellation reported as an error");
+    await emit("scan-progress", { phase: "walking", folder: "/test", filesFound: 5 });
+    assert(el("stat-files").textContent === "0", "Progress listener leaked");
   }],
   ["progress listener failure restores the setup screen", async () => {
-    const { t, el, doc } = await fixture();
-    t.listenError = "Event connection failed";
+    const { t, el, doc, win } = await fixture();
+    const invoke = win.__TAURI_INTERNALS__.invoke;
+    win.__TAURI_INTERNALS__.invoke = (name, args, options) => name === "plugin:event|listen" && args.event === "scan-progress"
+      ? Promise.reject("Event connection failed") : invoke(name, args, options);
     el("btn-start-scan").click();
     await until(() => doc.body.dataset.screen === "setup");
-    assert(el("setup-note").textContent.includes(t.listenError), "Missing error");
+    assert(el("setup-note").textContent.includes("Event connection failed"), "Missing error");
+    assert(!el("toast").hidden && el("toast").classList.contains("toast--error"), "Error toast missing");
     assert(!t.calls.some((c) => c.name === "scan"), "Scan started without listener");
+  }],
+  ["dropped folders are added and dropped files are refused", async () => {
+    const { t, el, doc, emit, calls, scan } = await fixture();
+    t.handlers.folders_from_paths = async ({ paths }) => paths.filter((p) => !p.endsWith(".txt"));
+    await emit("tauri://drag-drop", { paths: ["/dropped", "/notes.txt"], position: { x: 1, y: 1 } });
+    await until(() => el("source-list").children.length === 2);
+    assert(el("source-list").textContent.includes("/dropped"), "Dropped folder missing");
+    assert(el("toast").textContent === "Only folders can be added.", "Dropped file accepted silently");
+    await scan();
+    await emit("tauri://drag-drop", { paths: ["/late"], position: { x: 1, y: 1 } });
+    await tick();
+    assert(calls("folders_from_paths").length === 1, "Drop accepted outside the setup screen");
+  }],
+  ["folders can be removed and are never listed twice", async () => {
+    const { el, calls } = await fixture();
+    el("btn-add-folder").click();
+    await until(() => calls("pick_folders").length === 2);
+    await tick();
+    assert(el("source-list").children.length === 1, "Folder listed twice");
+    assert(el("source-empty").hidden, "Empty note shown beside a folder");
+    el("source-list").querySelector("button[aria-label='Remove /test']").click();
+    assert(el("source-list").children.length === 0, "Folder not removed");
+    assert(!el("source-empty").hidden, "Empty note missing");
+    assert(el("btn-start-scan").disabled, "Scan possible without folders");
+  }],
+  ["folder picker errors are reported", async () => {
+    const { t, el } = await fixture();
+    t.handlers.pick_folders = () => { throw "Dialog unavailable"; };
+    el("btn-add-folder").click();
+    await until(() => !el("toast").hidden);
+    assert(el("toast").textContent.includes("Dialog unavailable"), "Picker error lost");
+  }],
+  ["file context menu toggles selection and opens files", async () => {
+    const { t, el, doc, win, scan, fire, calls } = await fixture();
+    t.handlers.open_file = async () => null;
+    t.handlers.reveal_file = async () => null;
+    await scan();
+    const [selectItem, menu] = t.menus;
+    const [open, reveal] = menu.options.items;
+    const row = doc.querySelector(".dupe-file");
+    row.dispatchEvent(new win.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    await until(() => calls("plugin:menu|popup").length === 1);
+    assert(calls("plugin:menu|set_text")[0].args.text === "Select for trash", "Wrong menu label");
+    fire(selectItem.handler);
+    assert(row.querySelector("input").checked, "Menu did not select the file");
+    assert(el("ledger-count").textContent === "1 selected", "Ledger not updated");
+    row.dispatchEvent(new win.MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    await until(() => calls("plugin:menu|popup").length === 2);
+    assert(calls("plugin:menu|set_text")[1].args.text === "Unselect", "Menu label ignores selection");
+    fire(selectItem.handler);
+    assert(!row.querySelector("input").checked && el("ledger").hidden, "Menu did not unselect the file");
+    fire(open.handler); fire(reveal.handler); await tick();
+    assert(calls("open_file")[0]?.args.path === "/test/0", "Open went to the wrong file");
+    assert(calls("reveal_file")[0]?.args.path === "/test/0", "Reveal went to the wrong file");
+  }],
+  ["play and double-click open the file, and failures are reported", async () => {
+    const { t, el, doc, win, scan, calls } = await fixture();
+    const value = summary(2);
+    value.exactGroups[0].files[1].playable = true;
+    t.handlers.open_file = async ({ path }) => { if (path === "/test/0") throw "No app for this file"; };
+    await scan(value);
+    const [plain, playable] = doc.querySelectorAll(".dupe-file");
+    assert(plain.querySelector(".dupe-file__play").getAttribute("aria-hidden") === "true", "Non-media file offers play");
+    playable.querySelector(".dupe-file__play").click();
+    assert(calls("open_file")[0]?.args.path === "/test/1", "Play did not open the file");
+    assert(!playable.querySelector("input").checked, "Play toggled selection");
+    plain.querySelector(".dupe-file__path").dispatchEvent(new win.MouseEvent("dblclick", { bubbles: true }));
+    await until(() => !el("toast").hidden);
+    assert(el("toast").textContent.includes("No app for this file"), "Open error lost");
+  }],
+  ["titlebar buttons drive the current window", async () => {
+    const { el, calls } = await fixture();
+    for (const [id, command] of [["btn-minimize", "minimize"], ["btn-maximize", "toggle_maximize"], ["btn-close", "close"]]) {
+      el(id).click();
+      await until(() => calls(`plugin:window|${command}`).length === 1);
+      assert(calls(`plugin:window|${command}`)[0].args.label === "main", `${command} targeted another window`);
+    }
   }],
   ["selecting every copy cannot start deletion", async () => {
     const { scan, el, select, t } = await fixture();
@@ -162,6 +285,7 @@ const tests = [
       assert(t.calls.some((c) => c.name === "delete_files_permanently"), "Fallback was not called");
       assert(!el("verify-contents").disabled, "Verification option stays locked");
       assert(el("operation-errors").hidden, el("operation-errors").textContent);
+      assert(el("toast").textContent === "Permanently deleted 1 file.", `Unexpected toast ${el("toast").textContent}`);
       assert(t.errors.length === 0, t.errors.join("; "));
       if (!verifyContents) iframe.remove();
     }
@@ -190,6 +314,7 @@ const tests = [
     el("btn-trash").click(); await until(() => !el("btn-trash").disabled);
     assert(t.confirmations.length === 2, "Missing explicit permanent confirmation");
     assert(el("operation-errors").textContent.includes("File changed"), "Blocked error lost after partial success");
+    assert(el("ledger-count").textContent === "1 selected", "Failed file not kept selected");
   }],
   ["deletion locks navigation and repeated actions until completion", async () => {
     const { scan, el, select, t, doc, win } = await fixture();
@@ -205,13 +330,18 @@ const tests = [
     finish({ summary: summary(0), failures: [] });
     await until(() => !el("btn-trash").disabled);
     assert(!el("btn-new-scan").disabled, "Navigation not restored");
+    assert(el("toast").textContent === "Moved 1 file to trash.", `Unexpected toast ${el("toast").textContent}`);
+    el("btn-new-scan").click();
+    assert(doc.body.dataset.screen === "setup", "New scan did not return to setup");
   }],
   ["duration-only selections carry an explicit content warning", async () => {
-    const { scan, el, select, t } = await fixture();
+    const { scan, el, select, t, calls } = await fixture();
     const value = summary(); value.mediaGroups = value.exactGroups; value.exactGroups = [];
     await scan(value); select(0); t.confirm = () => false;
     el("btn-trash").click(); await until(() => !el("btn-trash").disabled);
     assert(t.confirmations[0].includes("content may be completely different"), "Missing media warning");
+    const dialog = calls("plugin:dialog|message")[0].args;
+    assert(dialog.title === "Move to trash" && dialog.kind === "warning", "Confirmation is not a warning dialog");
     assert(!t.calls.some((c) => c.name === "trash_files"), "Cancelled confirmation removed files");
   }],
 ];

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Linux native-window startup smoke check; does not scan or remove any files."""
 import os
-from pathlib import Path
 import signal
 import subprocess
+from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
-binary = root / "src-tauri/target/debug/duplicate_finder"
+binary = root / "target/debug/duplicate_finder"
 process = subprocess.Popen(
     ["dbus-run-session", "--", "xvfb-run", "-a", str(binary)],
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,

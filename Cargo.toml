@@ -1,0 +1,5 @@
+# Workspace at the repo root so tools that copy the workspace (cargo-mutants)
+# also get ../ui, which tauri::generate_context! embeds at compile time.
+[workspace]
+members = ["src-tauri"]
+resolver = "3"

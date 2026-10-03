@@ -76,7 +76,11 @@ pub struct ScanOptions {
 }
 
 #[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase", tag = "phase")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "phase"
+)]
 pub enum ScanProgress {
     Walking { folder: String, files_found: u64 },
     Hashing { done: u64, total: u64 },
@@ -224,6 +228,8 @@ mod tests {
         remove_paths(&mut summary, &HashSet::from(["f0".into()]));
         assert_eq!(summary.reclaimable_bytes, 0);
         assert_eq!(summary.media_groups.len(), 1);
+        remove_paths(&mut summary, &HashSet::from(["media-b".into()]));
+        assert!(summary.media_groups.is_empty(), "a lone file is no pair");
     }
 
     proptest! {
