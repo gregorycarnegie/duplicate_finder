@@ -15,7 +15,7 @@ impl TestDir {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir(&path).unwrap();
+        std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }
     pub fn file(&self, name: &str, contents: &[u8]) -> String {

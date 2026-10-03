@@ -865,24 +865,20 @@ mod tests {
         assert!(!std::path::Path::new(&path).exists());
         #[cfg(not(target_os = "macos"))]
         {
-            let expected = std::path::PathBuf::from(&path);
+            // Match on the folder, which is unique to this run: Windows lists
+            // items by display name, which drops the extension when Explorer
+            // hides known file types.
             let listed = trash::os_limited::list().unwrap();
             let total = listed.len();
             let (items, others): (Vec<_>, Vec<_>) = listed
                 .into_iter()
-                .partition(|item| item.original_path() == expected);
-            // Same name under another path means a path-form mismatch; no
-            // entry at all means the delete bypassed the trash.
-            let same_name: Vec<_> = others
-                .iter()
-                .filter(|item| item.name == name.as_str())
-                .map(|item| item.original_path())
-                .collect();
+                .partition(|item| item.original_parent == dir.0);
+            let others: Vec<_> = others.iter().take(20).map(|i| i.original_path()).collect();
             assert_eq!(
                 items.len(),
                 1,
-                "generated fixture not found in native trash: expected {expected:?}; \
-                 {total} items listed; same name at {same_name:?}"
+                "fixture from {:?} not found in native trash; {total} items listed, first 20: {others:?}",
+                dir.0
             );
             trash::os_limited::restore_all(items).unwrap();
         }

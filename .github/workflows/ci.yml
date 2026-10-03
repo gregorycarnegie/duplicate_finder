@@ -32,12 +32,7 @@ jobs:
       - name: Test
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
-      # Skipped on Windows: the hosted runner's session deletes permanently
-      # instead of using the Recycle Bin (trash reports success, the item never
-      # appears in the bin). Windows is covered by local runs; see
-      # docs/validation.md.
       - name: Native trash and restore
-        if: runner.os != 'Windows'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml native_trash_roundtrip -- --ignored --nocapture
 
       - name: Real media reencoding tests
