@@ -16,6 +16,7 @@
     selected: new Set(),
     scanning: false,
     removing: false,
+    filesByPath: new Map(),
   };
 
   // ---------------------------------------------------------------
@@ -188,6 +189,7 @@
       durationToleranceSecs: Number(toleranceInput.value),
       minFileSize: Number(minSizeSelect.value),
       includeHidden: includeHiddenInput.checked,
+      compareMediaContent: document.getElementById("compare-media").checked,
     };
 
     const seenFolders = new Set();
@@ -214,9 +216,12 @@
           if (p.total > 0) {
             scanRailFill.style.width = `${40 + Math.min(40, (p.done / p.total) * 40)}%`;
           }
+        } else if (p.phase === "comparing") {
+          if (p.done === 0) logLine("comparing sampled media content…");
+          if (p.total > 0) scanRailFill.style.width = `${80 + (p.done / p.total) * 10}%`;
         } else if (p.phase === "verifying") {
-          if (p.done === 0) logLine("verifying result files before review…");
-          if (p.total > 0) scanRailFill.style.width = `${80 + (p.done / p.total) * 20}%`;
+          if (p.done <= 1) logLine("verifying result files before review…");
+          if (p.total > 0) scanRailFill.style.width = `${90 + (p.done / p.total) * 10}%`;
         }
       });
       const pendingScan = invoke("scan", { options });
@@ -258,6 +263,7 @@
   const ledgerCount = document.getElementById("ledger-count");
   const ledgerSize = document.getElementById("ledger-size");
   const btnTrash = document.getElementById("btn-trash");
+  const verifyContentsInput = document.getElementById("verify-contents");
 
   let contextFile = null;
   let contextCheckbox = null;
@@ -352,6 +358,28 @@
     return row;
   }
 
+  // Keep the initial DOM bounded even when a scan returns thousands of groups
+  // or a single group contains many thousands of files.
+  function renderPages(container, items, pageSize, render, noun) {
+    let offset = 0;
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "btn btn--ghost btn--small result-more";
+    more.addEventListener("click", appendPage);
+    function appendPage() {
+      const fragment = document.createDocumentFragment();
+      const end = Math.min(offset + pageSize, items.length);
+      while (offset < end) fragment.append(render(items[offset++]));
+      more.remove();
+      container.append(fragment);
+      if (offset < items.length) {
+        more.textContent = `Show ${Math.min(pageSize, items.length - offset)} more ${noun} (${items.length - offset} remaining)`;
+        container.append(more);
+      }
+    }
+    appendPage();
+  }
+
   function renderGroup(group, kind) {
     const card = document.createElement("div");
     card.className = `dupe-group dupe-group--${kind}`;
@@ -369,17 +397,18 @@
     header.append(left, right);
     card.append(header);
 
-    for (const file of group.files) {
-      card.append(renderFileRow(file));
-    }
+    renderPages(card, group.files, 50, renderFileRow, "files");
 
     return card;
   }
 
   function renderResults() {
     const s = state.summary;
-    const visiblePaths = new Set([...s.exactGroups, ...s.mediaGroups].flatMap((group) => group.files.map((file) => file.path)));
-    state.selected = new Set([...state.selected].filter((path) => visiblePaths.has(path)));
+    state.filesByPath = new Map();
+    for (const group of [...s.exactGroups, ...s.mediaGroups]) {
+      for (const file of group.files) state.filesByPath.set(file.path, file);
+    }
+    state.selected = new Set([...state.selected].filter((path) => state.filesByPath.has(path)));
     summaryFiles.textContent = s.filesScannedText;
     summaryReclaim.textContent = s.reclaimableText;
     summaryTime.textContent = s.elapsedText;
@@ -389,11 +418,11 @@
     document.getElementById("scan-warning-count").textContent = `${s.warnings.length} scan issue(s) — results may be incomplete`;
     const warningList = document.getElementById("scan-warning-list");
     warningList.replaceChildren();
-    for (const warning of s.warnings) {
+    renderPages(warningList, s.warnings, 100, (warning) => {
       const li = document.createElement("li");
       li.textContent = warning;
-      warningList.append(li);
-    }
+      return li;
+    }, "issues");
     resultsEmpty.textContent = s.warnings.length
       ? "No matches found among the files successfully checked. Review the scan issues above."
       : "No matches found.";
@@ -412,8 +441,8 @@
     sectionMedia.hidden = s.mediaGroups.length === 0;
     resultsEmpty.hidden = s.exactGroups.length > 0 || s.mediaGroups.length > 0;
 
-    for (const group of s.exactGroups) exactGroupsEl.append(renderGroup(group, "exact"));
-    for (const group of s.mediaGroups) mediaGroupsEl.append(renderGroup(group, "media"));
+    renderPages(exactGroupsEl, s.exactGroups, 25, (group) => renderGroup(group, "exact"), "groups");
+    renderPages(mediaGroupsEl, s.mediaGroups, 25, (group) => renderGroup(group, "media"), "groups");
 
     updateLedger();
   }
@@ -423,13 +452,8 @@
     ledger.hidden = count === 0;
     if (count === 0) return;
 
-    const allFiles = [...state.summary.exactGroups, ...state.summary.mediaGroups].flatMap(
-      (g) => g.files,
-    );
-    const bytes = allFiles.reduce(
-      (total, file) => total + (state.selected.has(file.path) ? file.size : 0),
-      0,
-    );
+    let bytes = 0;
+    for (const path of state.selected) bytes += state.filesByPath.get(path)?.size || 0;
 
     ledgerCount.textContent = `${count} selected`;
     ledgerSize.textContent = formatBytes(bytes);
@@ -439,6 +463,7 @@
     if (state.removing) return;
     document.getElementById("operation-errors").hidden = true;
     state.summary = null;
+    state.filesByPath.clear();
     state.selected = new Set();
     updateLedger();
     setScreen("setup");
@@ -453,7 +478,9 @@
       showToast("Keep at least one file in each group.", true);
       return;
     }
+    const verifyContents = verifyContentsInput.checked;
     state.removing = true;
+    verifyContentsInput.disabled = true;
     btnTrash.disabled = true;
     btnNewScan.disabled = true;
     const errorPanel = document.getElementById("operation-errors");
@@ -463,11 +490,11 @@
       const hasMedia = state.summary.mediaGroups.some((group) => group.files.some((file) => state.selected.has(file.path)));
       const confirmed = await confirm(
         `Move ${paths.length} ${noun} to the trash? This can be undone from your system trash.` +
-        (hasMedia ? "\n\nSome selected files only have similar durations. Their content may be completely different. Compare them before removing." : ""),
+        (hasMedia ? "\n\nSome selected files are media comparisons, based on duration or sampled content. Unsampled content may be completely different, including video soundtracks. Compare them before removing." : ""),
         { title: "Move to trash", kind: "warning" },
       );
       if (!confirmed) return;
-      const result = await invoke("trash_files", { paths });
+      const result = await invoke("trash_files", { paths, verifyContents });
       state.summary = result.summary;
       let failures = result.failures;
       let failedPaths = new Set(failures.map((f) => f.path));
@@ -483,7 +510,7 @@
           { title: "Permanently delete", kind: "warning" },
         );
         if (permanent) {
-          const permResult = await invoke("delete_files_permanently", { paths: eligible.map((f) => f.path) });
+          const permResult = await invoke("delete_files_permanently", { paths: eligible.map((f) => f.path), verifyContents });
           state.summary = permResult.summary;
           failures = [...failures.filter((f) => !f.canDeletePermanently), ...permResult.failures];
           failedPaths = new Set(failures.map((f) => f.path));
@@ -502,6 +529,7 @@
       showToast(String(err), true);
     } finally {
       state.removing = false;
+      verifyContentsInput.disabled = false;
       btnTrash.disabled = false;
       btnNewScan.disabled = false;
       renderResults();

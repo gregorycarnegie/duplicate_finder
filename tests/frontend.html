@@ -70,6 +70,42 @@ async function fixture() {
   return { win, doc, t, el, scan, select };
 }
 const tests = [
+  ["content comparison option reaches the backend", async () => {
+    const { scan, el, t } = await fixture();
+    el("compare-media").checked = true;
+    await scan();
+    assert(t.calls.find((c) => c.name === "scan").args.options.compareMediaContent === true, "Content comparison option lost");
+  }],
+  ["100,000 result files render in bounded pages and retain selection", async () => {
+    const { scan, el, select, doc, win } = await fixture();
+    const value = summary(100000);
+    await scan(value);
+    assert(doc.querySelectorAll(".dupe-file").length === 50, "Entire large group rendered eagerly");
+    select(0);
+    el("exact-groups").querySelector(".result-more").click();
+    assert(doc.querySelectorAll(".dupe-file").length === 100, "Next file page missing");
+    select(50);
+    assert(el("ledger-count").textContent === "2 selected", "Selection lost between pages");
+    assert(el("ledger-size").textContent === "8 B", "Selection size incorrect");
+    assert(doc.querySelector(".dupe-file input").checked, "First-page selection lost");
+  }],
+  ["many groups and scan issues are also paginated", async () => {
+    const { scan, el, doc } = await fixture();
+    const value = summary(0);
+    value.exactGroups = Array.from({ length: 1000 }, (_, i) => {
+      const group = summary(2).exactGroups[0];
+      group.files.forEach((file, j) => file.path = `/test/${i}/${j}`);
+      return group;
+    });
+    value.warnings = Array.from({ length: 1000 }, (_, i) => `Issue ${i}`);
+    await scan(value);
+    assert(doc.querySelectorAll(".dupe-group").length === 25, "Too many groups rendered");
+    assert(el("scan-warning-list").querySelectorAll("li").length === 100, "Too many errors rendered");
+    el("exact-groups").querySelector(":scope > .result-more").click();
+    assert(doc.querySelectorAll(".dupe-group").length === 50, "Next group page missing");
+    el("scan-warning-list").querySelector(".result-more").click();
+    assert(el("scan-warning-list").querySelectorAll("li").length === 200, "Next error page missing");
+  }],
   ["scan issues are visible and incomplete results do not claim a clean scan", async () => {
     const { scan, el, win } = await fixture();
     const value = summary(0);
@@ -106,6 +142,29 @@ const tests = [
     el("btn-trash").click(); await tick();
     assert(t.confirmations.length === 0, "Deletion confirmation should not open");
     assert(el("toast").textContent.includes("Keep at least one"), "Missing keep-copy message");
+  }],
+  ["removal content verification defaults off and reaches both commands", async () => {
+    for (const verifyContents of [false, true]) {
+      const { scan, el, select, t } = await fixture();
+      assert(!el("verify-contents").checked, "Expensive verification enabled by default");
+      el("verify-contents").checked = verifyContents;
+      const value = summary(); await scan(value); select(0);
+      t.handlers.trash_files = async (args) => {
+        assert(args.verifyContents === verifyContents, "Trash verification option lost");
+        assert(el("verify-contents").disabled, "Verification option can change mid-removal");
+        return { summary: value, failures: [{ path: "/test/0", error: "No trash support", canDeletePermanently: true }] };
+      };
+      t.handlers.delete_files_permanently = async (args) => {
+        assert(args.verifyContents === verifyContents, "Permanent verification option lost");
+        return { summary: value, failures: [] };
+      };
+      el("btn-trash").click(); await until(() => !el("btn-trash").disabled);
+      assert(t.calls.some((c) => c.name === "delete_files_permanently"), "Fallback was not called");
+      assert(!el("verify-contents").disabled, "Verification option stays locked");
+      assert(el("operation-errors").hidden, el("operation-errors").textContent);
+      assert(t.errors.length === 0, t.errors.join("; "));
+      if (!verifyContents) iframe.remove();
+    }
   }],
   ["changed-file rejection never offers permanent deletion", async () => {
     const { scan, el, select, t } = await fixture();

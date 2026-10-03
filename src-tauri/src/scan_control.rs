@@ -3,10 +3,10 @@ use std::{
     fs::{self, Metadata},
     io,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 #[derive(Default)]
@@ -101,9 +101,45 @@ impl ScanControl {
     }
 }
 
+// Hash workers may finish out of order. Bound IPC traffic while keeping the
+// displayed progress monotonic and always delivering completion.
+#[derive(Default)]
+pub struct ProgressGate(Mutex<Option<(&'static str, u64, Instant)>>);
+impl ProgressGate {
+    pub fn allow(&self, phase: &'static str, done: u64, total: u64) -> bool {
+        self.allow_at(phase, done, total, Instant::now())
+    }
+    fn allow_at(&self, phase: &'static str, done: u64, total: u64, now: Instant) -> bool {
+        let mut last = self.0.lock().unwrap();
+        if let Some((last_phase, last_done, last_time)) = *last
+            && phase == last_phase
+        {
+            if done <= last_done {
+                return false;
+            }
+            if done != total && now.duration_since(last_time) < Duration::from_millis(100) {
+                return false;
+            }
+        }
+        *last = Some((phase, done, now));
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn progress_is_throttled_monotonic_and_finishes() {
+        let gate = ProgressGate::default();
+        let now = Instant::now();
+        assert!(gate.allow_at("hash", 0, 100, now));
+        assert!(!gate.allow_at("hash", 40, 100, now));
+        assert!(gate.allow_at("hash", 60, 100, now + Duration::from_millis(100)));
+        assert!(!gate.allow_at("hash", 50, 100, now + Duration::from_millis(200)));
+        assert!(gate.allow_at("hash", 100, 100, now + Duration::from_millis(110)));
+        assert!(gate.allow_at("compare", 0, 100, now + Duration::from_millis(111)));
+    }
     #[test]
     fn scan_and_delete_operations_are_exclusive_and_unlock_after_failure() {
         let operations = Operations::default();

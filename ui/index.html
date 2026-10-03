@@ -71,6 +71,14 @@
 
           <div class="field field--checkbox">
             <label class="checkbox">
+              <input type="checkbox" id="compare-media" />
+              <span>Compare media content (slower)</span>
+            </label>
+            <p class="field__hint">Compare sampled video frames and audio fingerprints. Requires ffmpeg; audio also needs Chromaprint support. Matches still need review.</p>
+          </div>
+
+          <div class="field field--checkbox">
+            <label class="checkbox">
               <input type="checkbox" id="include-hidden" />
               <span>Include hidden files and folders</span>
             </label>
@@ -132,6 +140,13 @@
         <summary id="scan-warning-count"></summary>
         <ul id="scan-warning-list"></ul>
       </details>
+      <div class="removal-options">
+        <label class="checkbox">
+          <input type="checkbox" id="verify-contents" aria-describedby="verify-contents-hint" />
+          <span>Verify file contents before removal</span>
+        </label>
+        <p class="field__hint" id="verify-contents-hint">Optional: rereads selected files and a retained copy in full. Can be slow for large files or network drives. When off, only file metadata is checked for changes.</p>
+      </div>
       <pre class="ffmpeg-note" id="operation-errors" role="alert" hidden></pre>
       <div class="results-body" id="results-body">
         <section class="group-section" id="section-exact">
@@ -147,10 +162,10 @@
         <section class="group-section" id="section-media">
           <h2 class="group-section__title group-section__title--likely">
             <span class="chip chip--likely">Compare</span>
-            Similar duration
+            Media comparisons
             <span class="group-section__count" id="media-count"></span>
           </h2>
-          <p class="group-section__hint">Duration only — content has not been matched. Play and compare these files before removing any. These groups are excluded from reclaimable space.</p>
+          <p class="group-section__hint">Each group states whether it matches by duration or sampled content. Samples do not prove complete equivalence; video frames do not compare soundtracks. Review files before removing any. These groups are excluded from reclaimable space.</p>
           <div id="media-groups"></div>
         </section>
 

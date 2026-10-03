@@ -6,8 +6,11 @@ use std::{
 pub struct TestDir(pub PathBuf);
 impl TestDir {
     pub fn new() -> Self {
+        Self::in_dir(&std::env::temp_dir())
+    }
+    pub fn in_dir(parent: &std::path::Path) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
+        let path = parent.join(format!(
             "duplicate-finder-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)

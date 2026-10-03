@@ -8,14 +8,19 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt update
-          sudo apt install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+          sudo apt install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev ffmpeg xvfb dbus-x11
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -25,10 +30,22 @@ jobs:
           workspaces: src-tauri
 
       - name: Test
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Native trash and restore
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml native_trash_roundtrip -- --ignored --nocapture
+
+      - name: Real media reencoding tests
+        if: runner.os == 'Linux'
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml fingerprint::tests::real_ -- --ignored --nocapture
 
       - name: Frontend regression tests
+        if: runner.os == 'Linux'
         run: python3 tests/run_frontend.py
 
       - name: Build
-        run: cargo build --manifest-path src-tauri/Cargo.toml
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Native Linux desktop startup
+        if: runner.os == 'Linux'
+        run: python3 tests/smoke_desktop.py

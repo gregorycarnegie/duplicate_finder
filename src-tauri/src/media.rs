@@ -55,8 +55,8 @@ struct ProbeStream {
     height: Option<u32>,
 }
 
-fn ffprobe() -> Command {
-    let command = Command::new("ffprobe");
+pub(crate) fn media_command(program: &str) -> Command {
+    let command = Command::new(program);
 
     #[cfg(windows)]
     {
@@ -69,10 +69,8 @@ fn ffprobe() -> Command {
     command
 }
 
-/// Checks for ffprobe. Returns false (without panicking) if it's unavailable,
-/// so the caller can disable duration-based matching gracefully.
 // Read bounded output concurrently so a full pipe cannot stall the child.
-fn run_command(
+pub(crate) fn run_command(
     command: &mut Command,
     control: &ScanControl,
     timeout: Duration,
@@ -96,7 +94,10 @@ fn run_command(
             break Err(error);
         }
         if start.elapsed() >= timeout {
-            break Err(io::Error::new(io::ErrorKind::TimedOut, "ffprobe timed out"));
+            break Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Media process timed out",
+            ));
         }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -110,18 +111,25 @@ fn run_command(
     let _ = child.wait();
     let output = reader
         .join()
-        .map_err(|_| io::Error::other("Cannot read ffprobe output"))??;
+        .map_err(|_| io::Error::other("Cannot read media process output"))??;
     if !status?.success() {
-        return Err(io::Error::other("ffprobe could not read this media file"));
+        return Err(io::Error::other(
+            "Media process failed (unsupported codec, missing feature, or unreadable input)",
+        ));
     }
     if output.len() > 1024 * 1024 {
-        return Err(io::Error::other("ffprobe output exceeded limit"));
+        return Err(io::Error::other("Media process output exceeded limit"));
     }
     Ok(output)
 }
 
 pub fn init(control: &ScanControl) -> bool {
-    run_command(ffprobe().arg("-version"), control, Duration::from_secs(5)).is_ok()
+    run_command(
+        media_command("ffprobe").arg("-version"),
+        control,
+        Duration::from_secs(5),
+    )
+    .is_ok()
 }
 
 pub fn probe(path: &str, kind: MediaKind, control: &ScanControl) -> io::Result<MediaInfo> {
@@ -130,7 +138,7 @@ pub fn probe(path: &str, kind: MediaKind, control: &ScanControl) -> io::Result<M
         MediaKind::Audio => "a:0",
     };
     let output = run_command(
-        ffprobe()
+        media_command("ffprobe")
             .args([
                 "-v",
                 "error",
@@ -180,22 +188,31 @@ pub fn probe_all<F: Fn(u64, u64) + Sync>(
     let total = candidates.len() as u64;
     let done = AtomicU64::new(0);
 
-    candidates
-        .par_iter()
-        .filter_map(|e| {
-            let kind = media_kind_for(&e.path)?;
-            let result = match probe(&e.path, kind, control) {
-                Ok(info) => Some((e.path.clone(), info)),
-                Err(error) => {
-                    control.warn(&e.path, error);
-                    None
-                }
-            };
-            let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-            on_progress(d, total);
-            result
-        })
-        .collect()
+    let pool = match rayon::ThreadPoolBuilder::new().num_threads(4).build() {
+        Ok(pool) => pool,
+        Err(error) => {
+            control.warn("Media probing", error);
+            return HashMap::new();
+        }
+    };
+    pool.install(|| {
+        candidates
+            .par_iter()
+            .filter_map(|e| {
+                let kind = media_kind_for(&e.path)?;
+                let result = match probe(&e.path, kind, control) {
+                    Ok(info) => Some((e.path.clone(), info)),
+                    Err(error) => {
+                        control.warn(&e.path, error);
+                        None
+                    }
+                };
+                let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+                on_progress(d, total);
+                result
+            })
+            .collect()
+    })
 }
 
 /// Clusters previously-probed media files whose durations fall within
@@ -246,6 +263,7 @@ fn cluster_sorted(
             let total_size: u64 = cluster.iter().map(|(e, _)| e.size).sum();
 
             groups.push(DuplicateGroup {
+                evidence: Default::default(),
                 files: cluster
                     .iter()
                     .map(|(e, info)| DuplicateFile {
@@ -260,10 +278,10 @@ fn cluster_sorted(
     };
 
     for item in sorted {
-        if let Some(first) = cluster.first() {
-            if item.1.duration_secs - first.1.duration_secs > tolerance_secs {
-                flush(&mut cluster, &mut groups);
-            }
+        if let Some(first) = cluster.first()
+            && item.1.duration_secs - first.1.duration_secs > tolerance_secs
+        {
+            flush(&mut cluster, &mut groups);
         }
         cluster.push(item);
     }

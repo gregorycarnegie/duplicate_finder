@@ -178,6 +178,7 @@ pub fn find_exact_duplicates_controlled<F: Fn(u64, u64) + Sync>(
         .map(|((size, _), files)| {
             let reclaimable_bytes = size * (files.len() as u64 - 1);
             DuplicateGroup {
+                evidence: Default::default(),
                 files: files
                     .iter()
                     .map(|e| DuplicateFile {
@@ -325,6 +326,60 @@ mod tests {
 
             fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    #[test]
+    #[ignore = "creates 100,000 small files; run explicitly for scale validation"]
+    fn large_library_scan() {
+        use crate::{scan_control::ScanControl, scanner, test_support::TestDir};
+        let count: usize = std::env::var("DUPLICATE_FINDER_STRESS_FILES")
+            .ok()
+            .map(|s| s.parse().expect("invalid stress file count"))
+            .unwrap_or(100_000);
+        assert!(count >= 100 && count.is_multiple_of(100));
+        let dir = TestDir::new();
+        let setup = Instant::now();
+        for bucket in 0..100 {
+            fs::create_dir(dir.0.join(bucket.to_string())).unwrap();
+        }
+        for index in 0..count {
+            // Each set of 100 files has identical contents; sets differ.
+            dir.file(
+                &format!("{}/{}.bin", index % 100, index),
+                &(index as u64 / 100).to_le_bytes(),
+            );
+        }
+        let setup_ms = setup.elapsed().as_millis();
+        let control = ScanControl::default();
+        let start = Instant::now();
+        let entries = scanner::walk_folders_controlled(
+            &[
+                dir.0.to_str().unwrap().into(),
+                dir.0.join("0").to_str().unwrap().into(),
+            ],
+            true,
+            0,
+            |_, _| {},
+            &control,
+        )
+        .unwrap();
+        let walk_ms = start.elapsed().as_millis();
+        assert_eq!(entries.len(), count);
+        let start = Instant::now();
+        let groups =
+            find_exact_duplicates_controlled(&entries, &HashMap::new(), |_, _| {}, &control);
+        let hash_ms = start.elapsed().as_millis();
+        assert_eq!(groups.len(), count / 100);
+        assert!(groups.iter().all(|g| g.files.len() == 100));
+        assert_eq!(
+            groups.iter().map(|g| g.reclaimable_bytes).sum::<u64>(),
+            (count as u64 - count as u64 / 100) * 8
+        );
+        assert!(control.warnings().is_empty());
+        println!(
+            "SCALE files={count} groups={} setup_ms={setup_ms} walk_ms={walk_ms} hash_ms={hash_ms}",
+            groups.len()
+        );
     }
 
     #[test]

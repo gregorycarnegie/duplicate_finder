@@ -786,3 +786,9 @@ select {
   overflow-wrap: anywhere;
 }
 #scan-warnings summary { cursor: pointer; }
+
+.result-more { margin: 12px; }
+
+.removal-options {
+  margin-bottom: 20px;
+}

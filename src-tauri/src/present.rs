@@ -1,7 +1,7 @@
 //! Turns the raw scan model into display-ready strings, so the frontend
 //! only has to drop text into the DOM (formatting logic used to be
 //! duplicated in ui/app.js).
-use crate::model::{DuplicateFile, DuplicateGroup, MediaInfo, ScanSummary};
+use crate::model::{DuplicateFile, DuplicateGroup, MatchEvidence, MediaInfo, ScanSummary};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -172,7 +172,12 @@ fn group_header_left(group: &DuplicateGroup, kind: GroupKind) -> String {
                 .collect();
             let spread = durations.iter().cloned().fold(f64::MIN, f64::max)
                 - durations.iter().cloned().fold(f64::MAX, f64::min);
-            format!("{n} {noun} \u{b7} duration spread {spread:.2}s")
+            let evidence = match group.evidence {
+                MatchEvidence::Duration => "duration only",
+                MatchEvidence::VideoFrames => "sampled video frames match",
+                MatchEvidence::AudioFingerprint => "sampled audio fingerprints match",
+            };
+            format!("{n} {noun} \u{b7} {evidence} \u{b7} spread {spread:.2}s")
         }
     }
 }

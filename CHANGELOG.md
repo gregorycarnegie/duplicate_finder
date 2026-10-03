@@ -1,9 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-10-03
+
+- Make full-content verification before trash/permanent removal optional and off by default; retain metadata and retained-copy checks.
+
+- Add optional sampled video-frame and Chromaprint audio comparisons with explicit evidence labels and conservative fallbacks.
+- Page large result groups and issue lists; throttle scan progress and bound media process concurrency.
+- Recheck both selected and retained files at the removal boundary; cache retained-file verification within a batch.
+- Add 100,000-file scale validation, real re-encoding fixtures, native trash/restore tests, and a Linux desktop startup smoke check.
+- Configure Linux, Windows, and macOS CI and record local results and remaining validation in `docs/validation.md`.
 
 - Deduplicate canonical paths across overlapping scan roots.
-- Recheck metadata and content before removal and require an unchanged retained group member.
+- Recheck metadata before removal, optionally verify full content, and require an unchanged retained group member.
 - Restrict permanent-delete fallback to failed trash operations, with fresh verification.
 - Prevent overlapping scans/removals and lock frontend actions during deletion.
 - Bound duration groups by their full spread; label them as comparisons and exclude them from reclaimable space.

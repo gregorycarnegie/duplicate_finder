@@ -34,9 +34,19 @@ pub struct DuplicateFile {
     pub media: Option<MediaInfo>,
 }
 
+#[derive(Serialize, Clone, Copy, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum MatchEvidence {
+    #[default]
+    Duration,
+    VideoFrames,
+    AudioFingerprint,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DuplicateGroup {
+    pub evidence: MatchEvidence,
     pub files: Vec<DuplicateFile>,
     pub reclaimable_bytes: u64,
 }
@@ -61,6 +71,8 @@ pub struct ScanOptions {
     pub duration_tolerance_secs: f64,
     pub min_file_size: u64,
     pub include_hidden: bool,
+    #[serde(default)]
+    pub compare_media_content: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -70,6 +82,7 @@ pub enum ScanProgress {
     Hashing { done: u64, total: u64 },
     Probing { done: u64, total: u64 },
     Verifying { done: u64, total: u64 },
+    Comparing { done: u64, total: u64 },
 }
 
 fn recompute_group(group: &mut DuplicateGroup) {
@@ -121,6 +134,7 @@ mod tests {
             files_scanned: 3,
             bytes_scanned: 300,
             exact_groups: vec![DuplicateGroup {
+                evidence: Default::default(),
                 files: vec![file("a", 100), file("b", 100), file("c", 100)],
                 reclaimable_bytes: 200,
             }],
@@ -144,6 +158,7 @@ mod tests {
             files_scanned: 2,
             bytes_scanned: 200,
             exact_groups: vec![DuplicateGroup {
+                evidence: Default::default(),
                 files: vec![file("a", 100), file("b", 100)],
                 reclaimable_bytes: 100,
             }],
@@ -176,6 +191,7 @@ mod tests {
                 let total: u64 = sizes.iter().sum();
                 let max = sizes.iter().copied().max().unwrap_or(0);
                 DuplicateGroup {
+                    evidence: Default::default(),
                     files,
                     reclaimable_bytes: total - max,
                 }
@@ -199,6 +215,7 @@ mod tests {
     fn duration_candidates_do_not_count_as_reclaimable_space() {
         let mut summary = summary_from_group_sizes(&[vec![100, 100]]);
         summary.media_groups = vec![DuplicateGroup {
+            evidence: Default::default(),
             files: vec![file("media-a", 500), file("media-b", 1000)],
             reclaimable_bytes: 500,
         }];

@@ -104,6 +104,37 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_is_reported_without_losing_readable_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_support::TestDir::new();
+        let blocked = dir.0.join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        dir.file("visible", b"visible");
+        dir.file("blocked/secret", b"secret");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let control = ScanControl::default();
+        let entries = walk_folders_controlled(
+            &[dir.0.to_str().unwrap().into()],
+            true,
+            0,
+            |_, _| {},
+            &control,
+        )
+        .unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        // Elevated test runners can bypass POSIX permissions; normal desktop
+        // users must get an explicit issue and keep the readable results.
+        if entries.len() == 1 {
+            assert!(!control.warnings().is_empty());
+            assert!(entries[0].path.ends_with("visible"));
+        } else {
+            assert_eq!(entries.len(), 2);
+            eprintln!("permission-denied branch not exercised: runner bypasses POSIX permissions");
+        }
+    }
+
     #[test]
     fn overlapping_and_aliased_roots_do_not_create_duplicates() {
         let dir = crate::test_support::TestDir::new();

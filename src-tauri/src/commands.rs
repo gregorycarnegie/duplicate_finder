@@ -1,13 +1,13 @@
 use crate::{
-    hashing, media,
+    fingerprint, hashing, media,
     model::{self, DuplicateGroup, ScanOptions, ScanProgress, ScanSummary},
     present::{self, ScanSummaryView},
-    scan_control::{FileSnapshot, FileStamp, Operations, ScanControl},
+    scan_control::{FileSnapshot, FileStamp, Operations, ProgressGate, ScanControl},
     scanner,
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::{atomic::Ordering, Mutex},
+    sync::{Mutex, atomic::Ordering},
     time::Instant,
 };
 use tauri::{AppHandle, Emitter, Manager};
@@ -115,6 +115,19 @@ fn run_scan(
     control: &ScanControl,
 ) -> Result<(ScanSummary, HashMap<String, FileSnapshot>), String> {
     let start = Instant::now();
+    let gate = ProgressGate::default();
+    let emit_progress = |progress: ScanProgress| {
+        let (phase, done, total) = match &progress {
+            ScanProgress::Walking { files_found, .. } => ("walking", *files_found, 0),
+            ScanProgress::Probing { done, total } => ("probing", *done, *total),
+            ScanProgress::Hashing { done, total } => ("hashing", *done, *total),
+            ScanProgress::Comparing { done, total } => ("comparing", *done, *total),
+            ScanProgress::Verifying { done, total } => ("verifying", *done, *total),
+        };
+        if gate.allow(phase, done, total) {
+            let _ = app.emit("scan-progress", progress);
+        }
+    };
     if options.folders.is_empty() {
         return Err("Add at least one folder to scan.".into());
     }
@@ -128,13 +141,10 @@ fn run_scan(
         options.include_hidden,
         options.min_file_size,
         |folder, files_found| {
-            let _ = app.emit(
-                "scan-progress",
-                ScanProgress::Walking {
-                    folder: folder.to_string(),
-                    files_found,
-                },
-            );
+            emit_progress(ScanProgress::Walking {
+                folder: folder.to_string(),
+                files_found,
+            });
         },
         control,
     )
@@ -145,7 +155,7 @@ fn run_scan(
         media::probe_all(
             &entries,
             |done, total| {
-                let _ = app.emit("scan-progress", ScanProgress::Probing { done, total });
+                emit_progress(ScanProgress::Probing { done, total });
             },
             control,
         )
@@ -157,7 +167,7 @@ fn run_scan(
         &entries,
         &media_lookup,
         |done, total| {
-            let _ = app.emit("scan-progress", ScanProgress::Hashing { done, total });
+            emit_progress(ScanProgress::Hashing { done, total });
         },
         control,
     );
@@ -172,6 +182,14 @@ fn run_scan(
         options.duration_tolerance_secs,
         &exact_paths,
     );
+    let media_groups = if options.compare_media_content {
+        fingerprint::refine_groups(media_groups, control, |done, total| {
+            emit_progress(ScanProgress::Comparing { done, total });
+        })
+        .map_err(|e| e.to_string())?
+    } else {
+        media_groups
+    };
     let mut summary = ScanSummary {
         files_scanned: entries.len() as u64,
         bytes_scanned: entries.iter().map(|e| e.size).sum(),
@@ -192,13 +210,10 @@ fn run_scan(
     let mut invalid = HashSet::new();
     for (index, path) in paths.iter().enumerate() {
         control.check().map_err(|e| e.to_string())?;
-        let _ = app.emit(
-            "scan-progress",
-            ScanProgress::Verifying {
-                done: index as u64,
-                total: paths.len() as u64,
-            },
-        );
+        emit_progress(ScanProgress::Verifying {
+            done: index as u64 + 1,
+            total: paths.len() as u64,
+        });
         let result = (|| -> Result<FileSnapshot, String> {
             let stamp = control
                 .stamps
@@ -252,10 +267,17 @@ pub struct TrashResult {
     failures: Vec<OpFailure>,
 }
 
-fn verify_snapshot(path: &str, snapshot: &FileSnapshot) -> Result<(), String> {
+fn verify_snapshot(
+    path: &str,
+    snapshot: &FileSnapshot,
+    verify_contents: bool,
+) -> Result<(), String> {
     let changed = "File changed since scanning. Run a new scan before removing it.";
     if FileStamp::read(path).map_err(|e| e.to_string())? != snapshot.stamp {
         return Err(changed.into());
+    }
+    if !verify_contents {
+        return Ok(());
     }
     let hash =
         hashing::hash_file_controlled(path, &ScanControl::default()).map_err(|e| e.to_string())?;
@@ -273,12 +295,44 @@ fn remove_checked<F: FnMut(&str) -> Result<(), String>>(
     snapshots: &HashMap<String, FileSnapshot>,
     groups: &[DuplicateGroup],
     permanent: bool,
+    verify_contents: bool,
     mut remove: F,
+) -> (HashSet<String>, Vec<OpFailure>) {
+    remove_checked_with_verifier(
+        paths,
+        snapshots,
+        groups,
+        permanent,
+        &mut remove,
+        |path, snapshot| verify_snapshot(path, snapshot, verify_contents),
+    )
+}
+
+fn remove_checked_with_verifier<
+    F: FnMut(&str) -> Result<(), String>,
+    V: FnMut(&str, &FileSnapshot) -> Result<(), String>,
+>(
+    paths: &[String],
+    snapshots: &HashMap<String, FileSnapshot>,
+    groups: &[DuplicateGroup],
+    permanent: bool,
+    mut remove: F,
+    mut verify: V,
 ) -> (HashSet<String>, Vec<OpFailure>) {
     let selected: HashSet<&str> = paths.iter().map(String::as_str).collect();
     let mut removed = HashSet::new();
     let mut failures = Vec::new();
     let mut seen = HashSet::new();
+    let mut verified_keepers = HashSet::new();
+    let group_by_path: HashMap<&str, &DuplicateGroup> = groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .files
+                .iter()
+                .map(move |file| (file.entry.path.as_str(), group))
+        })
+        .collect();
     for path in paths {
         if !seen.insert(path) {
             continue;
@@ -287,22 +341,30 @@ fn remove_checked<F: FnMut(&str) -> Result<(), String>>(
             let snapshot = snapshots
                 .get(path)
                 .ok_or("File is not part of the latest scan")?;
-            verify_snapshot(path, snapshot)?;
-            let group = groups
-                .iter()
-                .find(|g| g.files.iter().any(|f| &f.entry.path == path))
+            verify(path, snapshot)?;
+            let group = group_by_path
+                .get(path.as_str())
                 .ok_or("File no longer belongs to a duplicate or comparison group")?;
-            let keeper = group.files.iter().any(|file| {
-                !selected.contains(file.entry.path.as_str())
-                    && snapshots
-                        .get(&file.entry.path)
-                        .is_some_and(|snapshot| verify_snapshot(&file.entry.path, snapshot).is_ok())
-            });
-            if !keeper {
-                return Err("Keep at least one unchanged file in each group. Run a new scan if a retained file changed.".into());
-            }
-            if FileStamp::read(path).map_err(|e| e.to_string())? != snapshot.stamp {
-                return Err("File changed during verification. Run a new scan.".into());
+            let keeper = group.files.iter().find_map(|file| {
+                let keeper_path = file.entry.path.as_str();
+                if selected.contains(keeper_path) { return None; }
+                let keeper_snapshot = snapshots.get(keeper_path)?;
+                if !verified_keepers.contains(keeper_path) {
+                    if verify(keeper_path, keeper_snapshot).is_err() { return None; }
+                    verified_keepers.insert(keeper_path.to_string());
+                }
+                Some((keeper_path, keeper_snapshot))
+            }).ok_or("Keep at least one unchanged file in each group. Run a new scan if a retained file changed.")?;
+            // Both names must still identify their verified files at the final
+            // boundary. Cached keeper hashes avoid rereading the same large file
+            // for every selected duplicate; metadata is always checked again.
+            if FileStamp::read(keeper.0).map_err(|e| e.to_string())? != keeper.1.stamp
+                || FileStamp::read(path).map_err(|e| e.to_string())? != snapshot.stamp
+            {
+                return Err(
+                    "A selected or retained file changed during verification. Run a new scan."
+                        .into(),
+                );
             }
             Ok(())
         })();
@@ -332,6 +394,7 @@ async fn remove_files(
     app: AppHandle,
     paths: Vec<String>,
     permanent: bool,
+    verify_contents: bool,
 ) -> Result<TrashResult, String> {
     let guard = app.state::<Operations>().begin()?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -365,13 +428,20 @@ async fn remove_files(
             .chain(&last.media_groups)
             .cloned()
             .collect();
-        let (removed, failures) = remove_checked(&paths, &snapshots, &groups, permanent, |path| {
-            if permanent {
-                std::fs::remove_file(path).map_err(|e| e.to_string())
-            } else {
-                trash::delete(path).map_err(|e| e.to_string())
-            }
-        });
+        let (removed, failures) = remove_checked(
+            &paths,
+            &snapshots,
+            &groups,
+            permanent,
+            verify_contents,
+            |path| {
+                if permanent {
+                    std::fs::remove_file(path).map_err(|e| e.to_string())
+                } else {
+                    trash::delete(path).map_err(|e| e.to_string())
+                }
+            },
+        );
         model::remove_paths(&mut last, &removed);
         app.state::<ScannedFiles>()
             .lock()
@@ -402,16 +472,21 @@ async fn remove_files(
 }
 
 #[tauri::command]
-pub async fn trash_files(app: AppHandle, paths: Vec<String>) -> Result<TrashResult, String> {
-    remove_files(app, paths, false).await
+pub async fn trash_files(
+    app: AppHandle,
+    paths: Vec<String>,
+    verify_contents: Option<bool>,
+) -> Result<TrashResult, String> {
+    remove_files(app, paths, false, verify_contents.unwrap_or(false)).await
 }
 
 #[tauri::command]
 pub async fn delete_files_permanently(
     app: AppHandle,
     paths: Vec<String>,
+    verify_contents: Option<bool>,
 ) -> Result<TrashResult, String> {
-    remove_files(app, paths, true).await
+    remove_files(app, paths, true, verify_contents.unwrap_or(false)).await
 }
 
 #[cfg(test)]
@@ -447,6 +522,7 @@ mod tests {
             })
             .collect();
         let groups = vec![DuplicateGroup {
+            evidence: Default::default(),
             files: paths
                 .iter()
                 .map(|p| DuplicateFile {
@@ -464,11 +540,62 @@ mod tests {
     }
 
     #[test]
+    fn content_verification_is_optional_for_selected_and_retained_files() {
+        for permanent in [false, true] {
+            for changed_index in [0, 2] {
+                let (_dir, mut snapshots, groups, paths) = fixture();
+                // Simulate content changing without a detectable metadata change.
+                snapshots.get_mut(&paths[changed_index]).unwrap().hash =
+                    blake3::hash(b"old content");
+                for verify_contents in [false, true] {
+                    let mut calls = 0;
+                    let (removed, failures) = remove_checked(
+                        &paths[..2],
+                        &snapshots,
+                        &groups,
+                        permanent,
+                        verify_contents,
+                        |_| {
+                            calls += 1;
+                            Ok(())
+                        },
+                    );
+                    if verify_contents {
+                        assert!(!removed.contains(&paths[0]));
+                        assert!(!failures.is_empty());
+                        assert!(failures.iter().all(|f| !f.can_delete_permanently));
+                    } else {
+                        assert_eq!(calls, 2);
+                        assert_eq!(removed.len(), 2);
+                        assert!(failures.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_checks_block_changed_targets_without_content_verification() {
+        let (_dir, snapshots, groups, paths) = fixture();
+        std::fs::write(&paths[0], b"changed size").unwrap();
+        for permanent in [false, true] {
+            let (removed, failures) =
+                remove_checked(&paths[..1], &snapshots, &groups, permanent, false, |_| {
+                    panic!("must not remove changed file")
+                });
+            assert!(removed.is_empty());
+            assert_eq!(failures.len(), 1);
+            assert!(!failures[0].can_delete_permanently);
+        }
+    }
+
+    #[test]
     fn removal_deletes_selected_files_and_retains_a_copy() {
         let (_dir, snapshots, groups, paths) = fixture();
-        let (removed, failures) = remove_checked(&paths[..2], &snapshots, &groups, true, |p| {
-            std::fs::remove_file(p).map_err(|e| e.to_string())
-        });
+        let (removed, failures) =
+            remove_checked(&paths[..2], &snapshots, &groups, true, false, |p| {
+                std::fs::remove_file(p).map_err(|e| e.to_string())
+            });
         assert_eq!(removed.len(), 2);
         assert!(failures.is_empty());
         assert!(!std::path::Path::new(&paths[0]).exists());
@@ -479,7 +606,7 @@ mod tests {
     fn cannot_remove_every_copy_or_an_unscanned_file() {
         let (dir, snapshots, groups, mut paths) = fixture();
         paths.push(dir.file("unscanned", b"unique"));
-        let (removed, failures) = remove_checked(&paths, &snapshots, &groups, false, |_| {
+        let (removed, failures) = remove_checked(&paths, &snapshots, &groups, false, false, |_| {
             panic!("must not remove")
         });
         assert!(removed.is_empty());
@@ -493,9 +620,10 @@ mod tests {
         std::fs::write(&paths[0], b"edit").unwrap();
         // Force equal metadata to independently exercise the content check.
         snapshots.get_mut(&paths[0]).unwrap().stamp = FileStamp::read(&paths[0]).unwrap();
-        let (removed, failures) = remove_checked(&paths[..1], &snapshots, &groups, false, |_| {
-            panic!("must not remove")
-        });
+        let (removed, failures) =
+            remove_checked(&paths[..1], &snapshots, &groups, false, true, |_| {
+                panic!("must not remove")
+            });
         assert!(removed.is_empty());
         assert_eq!(failures.len(), 1);
         assert!(!failures[0].can_delete_permanently);
@@ -505,12 +633,12 @@ mod tests {
     fn changed_or_missing_keeper_blocks_removal() {
         let (_dir, snapshots, groups, paths) = fixture();
         std::fs::write(&paths[2], b"new content").unwrap();
-        let (_, failures) = remove_checked(&paths[..2], &snapshots, &groups, true, |_| {
+        let (_, failures) = remove_checked(&paths[..2], &snapshots, &groups, true, false, |_| {
             panic!("must not remove")
         });
         assert_eq!(failures.len(), 2);
         std::fs::remove_file(&paths[2]).unwrap();
-        let (_, failures) = remove_checked(&paths[..2], &snapshots, &groups, true, |_| {
+        let (_, failures) = remove_checked(&paths[..2], &snapshots, &groups, true, false, |_| {
             panic!("must not remove")
         });
         assert_eq!(failures.len(), 2);
@@ -519,19 +647,20 @@ mod tests {
     #[test]
     fn partial_trash_failure_only_offers_fallback_for_os_failures() {
         let (_dir, snapshots, groups, paths) = fixture();
-        let (removed, failures) = remove_checked(&paths[..2], &snapshots, &groups, false, |p| {
-            if p == paths[0] {
-                Err("Trash not supported".into())
-            } else {
-                std::fs::remove_file(p).map_err(|e| e.to_string())
-            }
-        });
+        let (removed, failures) =
+            remove_checked(&paths[..2], &snapshots, &groups, false, false, |p| {
+                if p == paths[0] {
+                    Err("Trash not supported".into())
+                } else {
+                    std::fs::remove_file(p).map_err(|e| e.to_string())
+                }
+            });
         assert_eq!(removed, HashSet::from([paths[1].clone()]));
         assert_eq!(failures.len(), 1);
         assert!(failures[0].can_delete_permanently);
         assert_eq!(failures[0].error, "Trash not supported");
         std::fs::write(&paths[0], b"edit").unwrap();
-        let (_, failures) = remove_checked(&paths[..1], &snapshots, &groups, true, |_| {
+        let (_, failures) = remove_checked(&paths[..1], &snapshots, &groups, true, false, |_| {
             panic!("must not remove")
         });
         assert_eq!(failures.len(), 1);
@@ -546,6 +675,7 @@ mod tests {
             &[paths[0].clone(), paths[0].clone()],
             &snapshots,
             &groups,
+            false,
             false,
             |_| {
                 calls += 1;
@@ -564,11 +694,166 @@ mod tests {
         let target = dir.file("valuable", b"valuable content");
         std::fs::remove_file(&paths[0]).unwrap();
         std::os::unix::fs::symlink(&target, &paths[0]).unwrap();
-        let (_, failures) = remove_checked(&paths[..1], &snapshots, &groups, true, |_| {
+        let (_, failures) = remove_checked(&paths[..1], &snapshots, &groups, true, false, |_| {
             panic!("must not remove")
         });
         assert_eq!(failures.len(), 1);
         assert_eq!(std::fs::read(target).unwrap(), b"valuable content");
+    }
+
+    #[test]
+    fn replacing_target_during_keeper_verification_blocks_removal() {
+        let (_dir, snapshots, groups, paths) = fixture();
+        let (_, failures) = remove_checked_with_verifier(
+            &paths[..1],
+            &snapshots,
+            &groups,
+            true,
+            |_| panic!("must not delete a replacement"),
+            |path, snapshot| {
+                verify_snapshot(path, snapshot, true)?;
+                if path != paths[0] {
+                    std::fs::write(&paths[0], b"replacement content").unwrap();
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(failures.len(), 1);
+        assert!(!failures[0].can_delete_permanently);
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"replacement content");
+    }
+
+    #[test]
+    fn keeper_changed_after_hashing_blocks_removal() {
+        let (_dir, snapshots, groups, paths) = fixture();
+        let (_, failures) = remove_checked_with_verifier(
+            &paths[..2],
+            &snapshots,
+            &groups,
+            true,
+            |_| panic!("must retain original content"),
+            |path, snapshot| {
+                verify_snapshot(path, snapshot, true)?;
+                if path == paths[2] {
+                    std::fs::write(path, b"keeper changed").unwrap();
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(failures.len(), 2);
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"same");
+    }
+
+    #[test]
+    fn unchanged_keeper_is_hashed_once_per_batch() {
+        let (_dir, snapshots, groups, paths) = fixture();
+        let mut keeper_checks = 0;
+        let (removed, failures) = remove_checked_with_verifier(
+            &paths[..2],
+            &snapshots,
+            &groups,
+            true,
+            |p| std::fs::remove_file(p).map_err(|e| e.to_string()),
+            |path, snapshot| {
+                if path == paths[2] {
+                    keeper_checks += 1;
+                }
+                verify_snapshot(path, snapshot, true)
+            },
+        );
+        assert_eq!(removed.len(), 2);
+        assert!(failures.is_empty());
+        assert_eq!(keeper_checks, 1);
+    }
+
+    #[test]
+    #[ignore = "uses the actual OS trash and restores only its own generated fixture"]
+    fn native_trash_roundtrip() {
+        let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        let dir = TestDir::in_dir(&parent);
+        let name = format!(
+            "duplicate-finder-native-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = dir.file(&name, b"temporary native trash fixture");
+        let keeper = dir.file("keeper.txt", b"temporary native trash fixture");
+        let snapshots: HashMap<_, _> = [&path, &keeper]
+            .into_iter()
+            .map(|p| {
+                (
+                    p.clone(),
+                    FileSnapshot {
+                        stamp: FileStamp::read(p).unwrap(),
+                        hash: hashing::hash_file(p).unwrap(),
+                    },
+                )
+            })
+            .collect();
+        let groups = vec![DuplicateGroup {
+            evidence: Default::default(),
+            reclaimable_bytes: 29,
+            files: [&path, &keeper]
+                .into_iter()
+                .map(|p| DuplicateFile {
+                    entry: FileEntry {
+                        path: p.clone(),
+                        size: 29,
+                        modified: None,
+                    },
+                    media: None,
+                })
+                .collect(),
+        }];
+        let (removed, failures) = remove_checked(
+            std::slice::from_ref(&path),
+            &snapshots,
+            &groups,
+            false,
+            true,
+            |p| trash::delete(p).map_err(|e| e.to_string()),
+        );
+        assert!(failures.is_empty(), "native trash failed: {failures:?}");
+        assert_eq!(removed.len(), 1);
+        assert!(!std::path::Path::new(&path).exists());
+        #[cfg(not(target_os = "macos"))]
+        {
+            let expected = std::path::PathBuf::from(&path);
+            let items: Vec<_> = trash::os_limited::list()
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.original_path() == expected)
+                .collect();
+            assert_eq!(
+                items.len(),
+                1,
+                "generated fixture not found in native trash"
+            );
+            trash::os_limited::restore_all(items).unwrap();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // The trash crate has no macOS restore API. The generated unique
+            // filename identifies our one fixture; no other trash item is touched.
+            let home = std::env::var_os("HOME").expect("HOME is required for macOS native tests");
+            let trashed = std::path::PathBuf::from(home).join(".Trash").join(&name);
+            assert_eq!(
+                std::fs::read(&trashed).unwrap(),
+                b"temporary native trash fixture"
+            );
+            std::fs::rename(trashed, &path).unwrap();
+        }
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"temporary native trash fixture"
+        );
+        assert_eq!(
+            std::fs::read(&keeper).unwrap(),
+            b"temporary native trash fixture"
+        );
     }
 
     #[test]
