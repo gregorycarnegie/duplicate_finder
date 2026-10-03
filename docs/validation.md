@@ -33,7 +33,7 @@ Local validation before tagging v0.6.0 passed: 54 Rust tests (5 opt-in tests ski
 | macOS | Passed unit tests, native trash/restore, and build |
 | Windows | Unit tests passed; native trash/restore failed because its generated fixture was not found in the recycle-bin listing; the subsequent build step was skipped |
 
-The Windows native-trash failure remains unresolved. These are results for the release commit; see [current CI runs](https://github.com/gregorycarnegie/duplicate_finder/actions/workflows/ci.yml) for later commits.
+The Windows native-trash failure was later diagnosed (run 37111367371, commit 1d2f28c): `trash::delete` reported success and the fixture vanished, but the Recycle Bin listing held no item of that name under any path, so the hosted runner's session deleted it permanently rather than recycling it. The same test passes on a desktop Windows 11 machine, so CI now skips this step on Windows only and Windows trash/restore is validated locally. These are results for the release commit; see [current CI runs](https://github.com/gregorycarnegie/duplicate_finder/actions/workflows/ci.yml) for later commits.
 
 ## Earlier local checks — 2026-09-19
 
@@ -100,7 +100,7 @@ Probing uses at most four workers; content extraction uses two. Each child proce
 
 ## Remaining validation
 
-- Resolve the Windows native trash/restore failure recorded above, then confirm the Windows build job completes.
+- Windows trash/restore runs only locally, because hosted runners delete permanently. Where a user has turned off the Recycle Bin, Windows likewise deletes permanently while reporting success, and the app cannot tell the difference.
 - Native file pickers, confirmation dialogs, opening/revealing files, and accessibility still need hands-on checks on all supported platforms.
 - No slow physical disk, remote share, disconnected NAS, or large real-world media collection was available for testing.
 - Perceptual matching needs a representative labelled corpus to measure false positives and missed matches, especially crops, different edits, changed soundtracks, silence, and timing offsets.
