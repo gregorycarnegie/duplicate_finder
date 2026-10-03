@@ -2,8 +2,7 @@ use crate::{
     model::FileEntry,
     scan_control::{FileStamp, ScanControl},
 };
-use std::collections::HashSet;
-use std::time::UNIX_EPOCH;
+use std::{collections::HashSet, time::UNIX_EPOCH};
 use walkdir::{DirEntry, WalkDir};
 
 fn is_hidden(entry: &DirEntry) -> bool {

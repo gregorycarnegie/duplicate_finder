@@ -1,5 +1,7 @@
-use crate::model::{DuplicateFile, DuplicateGroup, FileEntry, MediaInfo};
-use crate::scan_control::{FileStamp, ScanControl};
+use crate::{
+    model::{DuplicateFile, DuplicateGroup, FileEntry, MediaInfo},
+    scan_control::{FileStamp, ScanControl},
+};
 use rayon::prelude::*;
 use std::{
     collections::HashMap,

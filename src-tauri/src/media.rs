@@ -1,14 +1,14 @@
-use crate::model::{DuplicateFile, DuplicateGroup, FileEntry, MediaInfo, MediaKind};
-use crate::scan_control::ScanControl;
+use crate::{
+    model::{DuplicateFile, DuplicateGroup, FileEntry, MediaInfo, MediaKind},
+    scan_control::ScanControl,
+};
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
+    io::{self, Read},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
-};
-use std::{
-    io::{self, Read},
     thread,
     time::{Duration, Instant},
 };
