@@ -1,8 +1,22 @@
-# Validation record — 2026-09-19
+# Validation record
 
-This records checks run locally and their limits. It is not a claim that the app is production-ready on every platform.
+This records local and CI checks and their limits. It is not a claim that the app is production-ready on every platform.
 
-## Local checks
+## v0.6.0 release checks — 2026-10-03
+
+Local validation before tagging v0.6.0 passed: 54 Rust tests (5 opt-in tests skipped), 12 browser tests, Clippy with warnings denied, and the application build. The new regressions cover optional content verification for both trash and permanent deletion, including retained metadata checks.
+
+[Release CI run for commit 2de00a1](https://github.com/gregorycarnegie/duplicate_finder/actions/runs/37105897528):
+
+| Platform | Result |
+| --- | --- |
+| Linux | Passed unit tests, native trash/restore, real-media comparisons, browser tests, build, and desktop startup |
+| macOS | Passed unit tests, native trash/restore, and build |
+| Windows | Unit tests passed; native trash/restore failed because its generated fixture was not found in the recycle-bin listing; the subsequent build step was skipped |
+
+The Windows native-trash failure remains unresolved. These are results for the release commit; see [current CI runs](https://github.com/gregorycarnegie/duplicate_finder/actions/workflows/ci.yml) for later commits.
+
+## Earlier local checks — 2026-09-19
 
 Environment: Linux, local ZFS storage, Rust 1.97.1, FFmpeg 6.1.1, debug/test builds.
 
@@ -64,7 +78,7 @@ Probing uses at most four workers; content extraction uses two. Each child proce
 
 ## Remaining validation
 
-- Windows and macOS build/unit/native-trash jobs are configured in CI but have not been run in this local session. Their status must be checked after a push.
+- Resolve the Windows native trash/restore failure recorded above, then confirm the Windows build job completes.
 - Native file pickers, confirmation dialogs, opening/revealing files, and accessibility still need hands-on checks on all supported platforms.
 - No slow physical disk, remote share, disconnected NAS, or large real-world media collection was available for testing.
 - Perceptual matching needs a representative labelled corpus to measure false positives and missed matches, especially crops, different edits, changed soundtracks, silence, and timing offsets.
