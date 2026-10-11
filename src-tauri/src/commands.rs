@@ -540,6 +540,7 @@ mod tests {
         model::{DuplicateFile, FileEntry},
         test_support::TestDir,
     };
+    use rstest::rstest;
 
     fn fixture() -> (
         TestDir,
@@ -583,54 +584,51 @@ mod tests {
         (dir, snapshots, groups, paths)
     }
 
-    #[test]
-    fn content_verification_is_optional_for_selected_and_retained_files() {
-        for permanent in [false, true] {
-            for changed_index in [0, 2] {
-                let (_dir, mut snapshots, groups, paths) = fixture();
-                // Simulate content changing without a detectable metadata change.
-                snapshots.get_mut(&paths[changed_index]).unwrap().hash =
-                    blake3::hash(b"old content");
-                for verify_contents in [false, true] {
-                    let mut calls = 0;
-                    let (removed, failures) = remove_checked(
-                        &paths[..2],
-                        &snapshots,
-                        &groups,
-                        permanent,
-                        verify_contents,
-                        |_| {
-                            calls += 1;
-                            Ok(())
-                        },
-                    );
-                    if verify_contents {
-                        assert!(!removed.contains(&paths[0]));
-                        assert!(!failures.is_empty());
-                        assert!(failures.iter().all(|f| !f.can_delete_permanently));
-                    } else {
-                        assert_eq!(calls, 2);
-                        assert_eq!(removed.len(), 2);
-                        assert!(failures.is_empty());
-                    }
-                }
-            }
+    #[rstest]
+    fn content_verification_is_optional_for_selected_and_retained_files(
+        #[values(false, true)] permanent: bool,
+        #[values(0, 2)] changed_index: usize,
+        #[values(false, true)] verify_contents: bool,
+    ) {
+        let (_dir, mut snapshots, groups, paths) = fixture();
+        // Simulate content changing without a detectable metadata change.
+        snapshots.get_mut(&paths[changed_index]).unwrap().hash = blake3::hash(b"old content");
+        let mut calls = 0;
+        let (removed, failures) = remove_checked(
+            &paths[..2],
+            &snapshots,
+            &groups,
+            permanent,
+            verify_contents,
+            |_| {
+                calls += 1;
+                Ok(())
+            },
+        );
+        if verify_contents {
+            assert!(!removed.contains(&paths[0]));
+            assert!(!failures.is_empty());
+            assert!(failures.iter().all(|f| !f.can_delete_permanently));
+        } else {
+            assert_eq!(calls, 2);
+            assert_eq!(removed.len(), 2);
+            assert!(failures.is_empty());
         }
     }
 
-    #[test]
-    fn metadata_checks_block_changed_targets_without_content_verification() {
+    #[rstest]
+    fn metadata_checks_block_changed_targets_without_content_verification(
+        #[values(false, true)] permanent: bool,
+    ) {
         let (_dir, snapshots, groups, paths) = fixture();
         std::fs::write(&paths[0], b"changed size").unwrap();
-        for permanent in [false, true] {
-            let (removed, failures) =
-                remove_checked(&paths[..1], &snapshots, &groups, permanent, false, |_| {
-                    panic!("must not remove changed file")
-                });
-            assert!(removed.is_empty());
-            assert_eq!(failures.len(), 1);
-            assert!(!failures[0].can_delete_permanently);
-        }
+        let (removed, failures) =
+            remove_checked(&paths[..1], &snapshots, &groups, permanent, false, |_| {
+                panic!("must not remove changed file")
+            });
+        assert!(removed.is_empty());
+        assert_eq!(failures.len(), 1);
+        assert!(!failures[0].can_delete_permanently);
     }
 
     #[test]
@@ -673,15 +671,14 @@ mod tests {
         assert!(!failures[0].can_delete_permanently);
     }
 
-    #[test]
-    fn changed_or_missing_keeper_blocks_removal() {
+    #[rstest]
+    fn changed_or_missing_keeper_blocks_removal(#[values(false, true)] missing: bool) {
         let (_dir, snapshots, groups, paths) = fixture();
-        std::fs::write(&paths[2], b"new content").unwrap();
-        let (_, failures) = remove_checked(&paths[..2], &snapshots, &groups, true, false, |_| {
-            panic!("must not remove")
-        });
-        assert_eq!(failures.len(), 2);
-        std::fs::remove_file(&paths[2]).unwrap();
+        if missing {
+            std::fs::remove_file(&paths[2]).unwrap();
+        } else {
+            std::fs::write(&paths[2], b"new content").unwrap();
+        }
         let (_, failures) = remove_checked(&paths[..2], &snapshots, &groups, true, false, |_| {
             panic!("must not remove")
         });

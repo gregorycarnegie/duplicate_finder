@@ -278,6 +278,7 @@ fn partition(
 mod tests {
     use super::*;
     use crate::{media, model::FileEntry, test_support::TestDir};
+    use rstest::rstest;
     fn fixture_file(path: String, kind: MediaKind, control: &ScanControl) -> DuplicateFile {
         let info = media::probe(&path, kind, control).unwrap();
         DuplicateFile {
@@ -456,11 +457,16 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn samples_spread_through_video_and_leave_audio_a_full_window() {
-        assert_eq!(sample_time(MediaKind::Video, 40.0, 0.5), 20.0);
-        assert_eq!(sample_time(MediaKind::Audio, 40.0, 0.5), 12.5);
-        assert_eq!(sample_time(MediaKind::Audio, 10.0, 0.5), 0.0);
+    #[rstest]
+    #[case::video(MediaKind::Video, 40.0, 20.0)]
+    #[case::audio(MediaKind::Audio, 40.0, 12.5)]
+    #[case::short_audio(MediaKind::Audio, 10.0, 0.0)]
+    fn samples_spread_through_video_and_leave_audio_a_full_window(
+        #[case] kind: MediaKind,
+        #[case] duration: f64,
+        #[case] expected: f64,
+    ) {
+        assert_eq!(sample_time(kind, duration, 0.5), expected);
     }
 
     /// Eight 9-pixel rows; the first `bits` horizontal steps, row-major,
@@ -482,14 +488,17 @@ mod tests {
         pixels
     }
 
-    #[test]
-    fn frame_hash_sets_one_bit_per_darkening_step_row_major() {
-        assert_eq!(frame_hash(&frame_with_bits(12)), Some(0x0fff));
-        assert_eq!(frame_hash(&frame_with_bits(8)), Some(0xff));
-        assert_eq!(frame_hash(&frame_with_bits(56)), Some((1 << 56) - 1));
-        // Too few or too many edges is a flat or saturated frame, not detail.
-        assert_eq!(frame_hash(&frame_with_bits(7)), None);
-        assert_eq!(frame_hash(&frame_with_bits(57)), None);
+    #[rstest]
+    #[case::row_major(12, Some(0x0fff))]
+    #[case::minimum_edges(8, Some(0xff))]
+    #[case::maximum_edges(56, Some((1 << 56) - 1))]
+    #[case::too_flat(7, None)]
+    #[case::saturated(57, None)]
+    fn frame_hash_sets_one_bit_per_darkening_step_row_major(
+        #[case] bits: u32,
+        #[case] expected: Option<u64>,
+    ) {
+        assert_eq!(frame_hash(&frame_with_bits(bits)), expected);
     }
 
     #[test]
@@ -537,32 +546,48 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn audio_matches_tolerates_three_words_of_codec_delay_either_way() {
+    #[rstest]
+    #[case::aligned(0, 0, true)]
+    #[case::delayed_right(0, 3, true)]
+    #[case::delayed_left(3, 0, true)]
+    #[case::too_delayed_right(0, 4, false)]
+    #[case::too_delayed_left(4, 0, false)]
+    fn audio_matches_tolerates_three_words_of_codec_delay_either_way(
+        #[case] left_offset: usize,
+        #[case] right_offset: usize,
+        #[case] expected: bool,
+    ) {
         let a = noise(40);
-        assert!(audio_matches(&a, &a));
-        assert!(audio_matches(&a, &a[3..]));
-        assert!(audio_matches(&a[3..], &a));
-        assert!(!audio_matches(&a, &a[4..]));
-        assert!(!audio_matches(&a[4..], &a));
+        assert_eq!(
+            audio_matches(&a[left_offset..], &a[right_offset..]),
+            expected
+        );
     }
 
-    #[test]
-    fn audio_matches_requires_sixteen_words_and_eighty_percent_overlap() {
+    #[rstest]
+    #[case::minimum_words(16, 16, true)]
+    #[case::too_few_words(15, 15, false)]
+    #[case::too_short_to_shift(2, 21, false)]
+    #[case::minimum_overlap(20, 16, true)]
+    #[case::insufficient_overlap(21, 16, false)]
+    fn audio_matches_requires_sixteen_words_and_eighty_percent_overlap(
+        #[case] left_len: usize,
+        #[case] right_len: usize,
+        #[case] expected: bool,
+    ) {
         let a = noise(21);
-        assert!(audio_matches(&a[..16], &a[..16]));
-        assert!(!audio_matches(&a[..15], &a[..15]));
-        // Too short to shift by the codec-delay window, and must not panic.
-        assert!(!audio_matches(&a[..2], &a));
-        assert!(audio_matches(&a[..20], &a[..16]));
-        assert!(!audio_matches(&a, &a[..16]));
+        assert_eq!(audio_matches(&a[..left_len], &a[..right_len]), expected);
     }
 
-    #[test]
-    fn audio_matches_allows_at_most_a_tenth_of_bits_to_differ() {
+    #[rstest]
+    #[case::at_limit(64, true)]
+    #[case::over_limit(65, false)]
+    fn audio_matches_allows_at_most_a_tenth_of_bits_to_differ(
+        #[case] bits: usize,
+        #[case] expected: bool,
+    ) {
         let a = noise(20);
-        assert!(audio_matches(&a, &flip(&a, 64)));
-        assert!(!audio_matches(&a, &flip(&a, 65)));
+        assert_eq!(audio_matches(&a, &flip(&a, bits)), expected);
     }
 
     #[test]

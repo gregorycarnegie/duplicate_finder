@@ -6,6 +6,7 @@
 //! unavailable (`move_to_trash`), so removal runs the same trash-failure
 //! fallback the UI offers and nothing here can open a window or fill the trash.
 use crate::{scan_control::Operations, test_support::TestDir};
+use rstest::rstest;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex, atomic::Ordering};
 use tauri::{
@@ -173,35 +174,41 @@ fn scan_progress_events_carry_the_fields_the_scanning_screen_reads() {
 }
 
 #[test]
-fn scan_rejects_invalid_options_with_the_message_the_setup_screen_shows() {
-    let (dir, folder) = library();
+fn scan_requires_at_least_one_folder() {
     let (_app, webview) = ui();
     assert_eq!(
         invoke(&webview, "scan", scan_args(&[], 1.5)),
         Err(json!("Add at least one folder to scan."))
     );
-    for tolerance in [-0.1, 5.1] {
+}
+
+#[rstest]
+#[case::below_minimum(-0.1, false)]
+#[case::above_maximum(5.1, false)]
+#[case::minimum(0.0, true)]
+#[case::maximum(5.0, true)]
+fn scan_validates_duration_tolerance(#[case] tolerance: f64, #[case] valid: bool) {
+    let dir = TestDir::new();
+    let (_app, webview) = ui();
+    let result = invoke(
+        &webview,
+        "scan",
+        scan_args(&[dir.0.to_str().unwrap()], tolerance),
+    );
+    if valid {
+        assert_eq!(result.unwrap()["filesScannedText"], "0 files scanned");
+    } else {
         assert_eq!(
-            invoke(&webview, "scan", scan_args(&[&folder], tolerance)),
+            result,
             Err(json!("Duration tolerance must be between 0 and 5 seconds.")),
-            "tolerance {tolerance}"
         );
-    }
-    let empty = dir.0.join("empty");
-    std::fs::create_dir(&empty).unwrap();
-    for tolerance in [0.0, 5.0] {
-        let view = invoke(
-            &webview,
-            "scan",
-            scan_args(&[empty.to_str().unwrap()], tolerance),
-        )
-        .unwrap_or_else(|e| panic!("tolerance {tolerance} rejected: {e}"));
-        assert_eq!(view["filesScannedText"], "0 files scanned");
     }
 }
 
-#[test]
-fn file_actions_only_accept_paths_from_the_latest_scan() {
+#[rstest]
+#[case::open("open_file", false)]
+#[case::reveal("reveal_file", true)]
+fn file_actions_only_accept_paths_from_the_latest_scan(#[case] cmd: &str, #[case] reveal: bool) {
     let (dir, folder) = library();
     let unique = dir.0.join("c.bin").to_str().unwrap().to_string();
     let (_app, webview) = ui();
@@ -209,22 +216,13 @@ fn file_actions_only_accept_paths_from_the_latest_scan() {
     let (_, paths) = scan(&webview, &folder);
     // Scanned but in no group, so never verified for the UI to act on.
     for path in [&unique, &folder] {
-        for cmd in ["open_file", "reveal_file"] {
-            assert_eq!(invoke(&webview, cmd, json!({ "path": path })), rejected);
-        }
+        assert_eq!(invoke(&webview, cmd, json!({ "path": path })), rejected);
     }
     // A listed file reaches the shell (stubbed in tests) with the right action.
     assert_eq!(
-        invoke(&webview, "open_file", json!({ "path": paths[0] })),
+        invoke(&webview, cmd, json!({ "path": paths[0] })),
         Err(json!(format!(
-            "Shell unavailable in tests: reveal=false {}",
-            paths[0]
-        )))
-    );
-    assert_eq!(
-        invoke(&webview, "reveal_file", json!({ "path": paths[0] })),
-        Err(json!(format!(
-            "Shell unavailable in tests: reveal=true {}",
+            "Shell unavailable in tests: reveal={reveal} {}",
             paths[0]
         )))
     );
@@ -344,46 +342,46 @@ fn a_later_removal_withdraws_an_earlier_permanent_deletion_offer() {
 // Only Windows lets a test rewrite contents while restoring every field
 // FileStamp compares; Unix stamps include ctime, which cannot be set back.
 #[cfg(windows)]
-#[test]
-fn content_verification_defaults_off_like_the_ui_checkbox() {
-    for verify in [None, Some(true)] {
-        let (_dir, folder) = library();
-        let (_app, webview) = ui();
-        let (_, paths) = scan(&webview, &folder);
-        let target = &paths[0];
-        let modified = std::fs::metadata(target).unwrap().modified().unwrap();
-        std::fs::write(target, b"Duplicate").unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(target)
-            .unwrap()
-            .set_modified(modified)
-            .unwrap();
-        let mut args = json!({ "paths": [target] });
-        if let Some(verify) = verify {
-            args["verifyContents"] = json!(verify);
-        }
-        let failure = &invoke(&webview, "trash_files", args).unwrap()["failures"][0];
-        if verify.is_some() {
-            assert_eq!(
-                failure["error"],
-                "File changed since scanning. Run a new scan before removing it."
-            );
-            assert!(std::path::Path::new(target).exists());
-            continue;
-        }
-        // Unverified, the edit goes unnoticed: the trash is tried and the
-        // fallback deletes without reading contents either.
-        assert_eq!(failure["error"], "Trash is unavailable in tests");
-        let result = invoke(
-            &webview,
-            "delete_files_permanently",
-            json!({ "paths": [target] }),
-        )
+#[rstest]
+#[case::default(None)]
+#[case::verified(Some(true))]
+fn content_verification_defaults_off_like_the_ui_checkbox(#[case] verify: Option<bool>) {
+    let (_dir, folder) = library();
+    let (_app, webview) = ui();
+    let (_, paths) = scan(&webview, &folder);
+    let target = &paths[0];
+    let modified = std::fs::metadata(target).unwrap().modified().unwrap();
+    std::fs::write(target, b"Duplicate").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(target)
+        .unwrap()
+        .set_modified(modified)
         .unwrap();
-        assert_eq!(result["failures"], json!([]));
-        assert!(!std::path::Path::new(target).exists());
+    let mut args = json!({ "paths": [target] });
+    if let Some(verify) = verify {
+        args["verifyContents"] = json!(verify);
     }
+    let failure = &invoke(&webview, "trash_files", args).unwrap()["failures"][0];
+    if verify.is_some() {
+        assert_eq!(
+            failure["error"],
+            "File changed since scanning. Run a new scan before removing it."
+        );
+        assert!(std::path::Path::new(target).exists());
+        return;
+    }
+    // Unverified, the edit goes unnoticed: the trash is tried and the
+    // fallback deletes without reading contents either.
+    assert_eq!(failure["error"], "Trash is unavailable in tests");
+    let result = invoke(
+        &webview,
+        "delete_files_permanently",
+        json!({ "paths": [target] }),
+    )
+    .unwrap();
+    assert_eq!(result["failures"], json!([]));
+    assert!(!std::path::Path::new(target).exists());
 }
 
 #[test]

@@ -101,6 +101,7 @@ pub fn walk_folders_controlled<F: FnMut(&str, u64)>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::fs;
 
     #[cfg(unix)]
@@ -260,26 +261,23 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn hidden_files_and_folders_are_excluded_by_default() {
-        let root = setup("scanner-test-hidden");
+    #[rstest]
+    #[case::excluded(false, &["visible.bin"])]
+    #[case::included(true, &[".hidden.bin", "inner.bin", "visible.bin"])]
+    fn hidden_files_and_folders_are_excluded_by_default(
+        #[case] include_hidden: bool,
+        #[case] expected: &[&str],
+    ) {
+        let dir = crate::test_support::TestDir::new();
+        let root = &dir.0;
         fs::write(root.join("visible.bin"), vec![0u8; 10]).unwrap();
         fs::write(root.join(".hidden.bin"), vec![0u8; 10]).unwrap();
         fs::create_dir(root.join(".hidden-dir")).unwrap();
         fs::write(root.join(".hidden-dir").join("inner.bin"), vec![0u8; 10]).unwrap();
 
         let folder = root.to_string_lossy().to_string();
-
-        let visible_only = walk_folders(std::slice::from_ref(&folder), false, 0, |_, _| {});
-        assert_eq!(names_of(&visible_only), vec!["visible.bin"]);
-
-        let with_hidden = walk_folders(&[folder], true, 0, |_, _| {});
-        assert_eq!(
-            names_of(&with_hidden),
-            vec![".hidden.bin", "inner.bin", "visible.bin"]
-        );
-
-        fs::remove_dir_all(root).unwrap();
+        let entries = walk_folders(&[folder], include_hidden, 0, |_, _| {});
+        assert_eq!(names_of(&entries), expected);
     }
 
     #[test]

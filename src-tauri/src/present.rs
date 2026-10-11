@@ -217,32 +217,39 @@ pub fn present_summary(summary: &ScanSummary) -> ScanSummaryView {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use rstest::rstest;
 
-    #[test]
-    fn bytes_scale_to_the_right_unit() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(format_bytes(10 * 1024 * 1024), "10 MB");
+    #[rstest]
+    #[case::zero(0, "0 B")]
+    #[case::bytes(512, "512 B")]
+    #[case::kilobytes(1536, "1.5 KB")]
+    #[case::megabytes(10 * 1024 * 1024, "10 MB")]
+    fn bytes_scale_to_the_right_unit(#[case] bytes: u64, #[case] expected: &str) {
+        assert_eq!(format_bytes(bytes), expected);
     }
 
-    #[test]
-    fn durations_include_hours_only_when_needed() {
-        assert_eq!(format_duration(65.25), "1:05.250");
-        assert_eq!(format_duration(3665.0), "1:01:05.000");
+    #[rstest]
+    #[case::minutes(65.25, "1:05.250")]
+    #[case::hours(3665.0, "1:01:05.000")]
+    fn durations_include_hours_only_when_needed(#[case] seconds: f64, #[case] expected: &str) {
+        assert_eq!(format_duration(seconds), expected);
     }
 
-    #[test]
-    fn counts_get_thousands_separators() {
-        assert_eq!(format_count(7), "7");
-        assert_eq!(format_count(1234), "1,234");
-        assert_eq!(format_count(1234567), "1,234,567");
+    #[rstest]
+    #[case::single_digit(7, "7")]
+    #[case::thousands(1234, "1,234")]
+    #[case::millions(1234567, "1,234,567")]
+    fn counts_get_thousands_separators(#[case] count: u64, #[case] expected: &str) {
+        assert_eq!(format_count(count), expected);
     }
 
-    #[test]
-    fn millis_switch_to_seconds_past_one_thousand() {
-        assert_eq!(format_ms(250), "250ms");
-        assert_eq!(format_ms(1500), "1.5s");
+    #[rstest]
+    #[case::millis(250, "250ms")]
+    #[case::below_one_second(999, "999ms")]
+    #[case::exactly_one_second(1000, "1.0s")]
+    #[case::seconds(1500, "1.5s")]
+    fn millis_switch_to_seconds_past_one_thousand(#[case] millis: u64, #[case] expected: &str) {
+        assert_eq!(format_ms(millis), expected);
     }
 
     #[test]
@@ -250,48 +257,47 @@ mod tests {
         assert_eq!(format_date(None), "");
     }
 
-    #[test]
-    fn millis_at_exactly_one_second_switch_to_seconds() {
-        assert_eq!(format_ms(999), "999ms");
-        assert_eq!(format_ms(1000), "1.0s");
+    // Day counts from Python's datetime; year 0 (a leap year) and earlier
+    // follow the same proleptic calendar.
+    #[rstest]
+    #[case::epoch(0, (1970, 1, 1))]
+    #[case::before_epoch(-1, (1969, 12, 31))]
+    #[case::february_end(58, (1970, 2, 28))]
+    #[case::march_start(59, (1970, 3, 1))]
+    #[case::leap_day(789, (1972, 2, 29))]
+    #[case::millennium_start(10957, (2000, 1, 1))]
+    #[case::millennium_leap_day(11016, (2000, 2, 29))]
+    #[case::after_millennium_leap_day(11017, (2000, 3, 1))]
+    #[case::millennium_end(11322, (2000, 12, 31))]
+    #[case::non_leap_century_february(-25509, (1900, 2, 28))]
+    #[case::non_leap_century_march(-25508, (1900, 3, 1))]
+    #[case::future_century_february(47540, (2100, 2, 28))]
+    #[case::future_century_march(47541, (2100, 3, 1))]
+    #[case::earlier_leap_century(-135081, (1600, 2, 29))]
+    #[case::after_earlier_leap_century(-134774, (1601, 1, 1))]
+    #[case::year_one(-719162, (1, 1, 1))]
+    #[case::year_9999(2932896, (9999, 12, 31))]
+    #[case::year_zero_march(-719468, (0, 3, 1))]
+    #[case::year_zero_leap_day(-719469, (0, 2, 29))]
+    #[case::year_zero_start(-719528, (0, 1, 1))]
+    #[case::negative_year(-719529, (-1, 12, 31))]
+    fn days_map_to_the_proleptic_gregorian_calendar(
+        #[case] days: i64,
+        #[case] date: (i64, u32, u32),
+    ) {
+        assert_eq!(civil_from_days(days), date);
+    }
+
+    #[rstest]
+    #[case::epoch(0, "Jan 1, 1970")]
+    #[case::before_epoch(-1, "Dec 31, 1969")]
+    #[case::leap_day_end(11016 * 86400 + 86399, "Feb 29, 2000")]
+    fn dates_outside_the_current_year_show_the_year(#[case] seconds: i64, #[case] expected: &str) {
+        assert_eq!(format_date(Some(seconds)), expected);
     }
 
     #[test]
-    fn days_map_to_the_proleptic_gregorian_calendar() {
-        // Day counts from Python's datetime; year 0 (a leap year) and earlier
-        // follow the same proleptic calendar.
-        for (days, date) in [
-            (0, (1970, 1, 1)),
-            (-1, (1969, 12, 31)),
-            (58, (1970, 2, 28)),
-            (59, (1970, 3, 1)),
-            (789, (1972, 2, 29)),
-            (10957, (2000, 1, 1)),
-            (11016, (2000, 2, 29)),
-            (11017, (2000, 3, 1)),
-            (11322, (2000, 12, 31)),
-            (-25509, (1900, 2, 28)),
-            (-25508, (1900, 3, 1)),
-            (47540, (2100, 2, 28)),
-            (47541, (2100, 3, 1)),
-            (-135081, (1600, 2, 29)),
-            (-134774, (1601, 1, 1)),
-            (-719162, (1, 1, 1)),
-            (2932896, (9999, 12, 31)),
-            (-719468, (0, 3, 1)),
-            (-719469, (0, 2, 29)),
-            (-719528, (0, 1, 1)),
-            (-719529, (-1, 12, 31)),
-        ] {
-            assert_eq!(civil_from_days(days), date, "day {days}");
-        }
-    }
-
-    #[test]
-    fn dates_show_the_year_only_outside_the_current_one() {
-        assert_eq!(format_date(Some(0)), "Jan 1, 1970");
-        assert_eq!(format_date(Some(-1)), "Dec 31, 1969");
-        assert_eq!(format_date(Some(11016 * 86400 + 86399)), "Feb 29, 2000");
+    fn dates_in_the_current_year_omit_the_year() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -333,30 +339,27 @@ mod tests {
         assert_eq!(present_file(&width_only).detail_text, "0:03.500");
     }
 
-    #[test]
-    fn media_groups_explain_their_evidence_and_duration_spread() {
-        for (evidence, text) in [
-            (MatchEvidence::Duration, "duration only"),
-            (MatchEvidence::VideoFrames, "sampled video frames match"),
-            (
-                MatchEvidence::AudioFingerprint,
-                "sampled audio fingerprints match",
-            ),
-        ] {
-            let group = DuplicateGroup {
-                evidence,
-                files: [11.25, 10.0, 10.5]
-                    .map(|d| media_file(d, None, None))
-                    .to_vec(),
-                reclaimable_bytes: 20,
-            };
-            let view = present_group(&group, GroupKind::Media);
-            assert_eq!(
-                view.header_left,
-                format!("3 files \u{b7} {text} \u{b7} spread 1.25s")
-            );
-            assert_eq!(view.header_right, "Compare content before removing");
-        }
+    #[rstest]
+    #[case::duration(MatchEvidence::Duration, "duration only")]
+    #[case::video(MatchEvidence::VideoFrames, "sampled video frames match")]
+    #[case::audio(MatchEvidence::AudioFingerprint, "sampled audio fingerprints match")]
+    fn media_groups_explain_their_evidence_and_duration_spread(
+        #[case] evidence: MatchEvidence,
+        #[case] text: &str,
+    ) {
+        let group = DuplicateGroup {
+            evidence,
+            files: [11.25, 10.0, 10.5]
+                .map(|d| media_file(d, None, None))
+                .to_vec(),
+            reclaimable_bytes: 20,
+        };
+        let view = present_group(&group, GroupKind::Media);
+        assert_eq!(
+            view.header_left,
+            format!("3 files \u{b7} {text} \u{b7} spread 1.25s")
+        );
+        assert_eq!(view.header_right, "Compare content before removing");
     }
 
     fn parse_duration_ms(s: &str) -> i64 {

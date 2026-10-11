@@ -294,6 +294,7 @@ fn cluster_sorted(
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use rstest::rstest;
 
     // Captured from ffprobe 8.1.2 with probe()'s arguments, for an H.264 MP4
     // and an MP3. Note the extra keys, padded durations and absent dimensions.
@@ -386,30 +387,25 @@ mod tests {
         assert!(groups.is_empty());
     }
 
-    #[test]
-    fn durations_right_at_the_tolerance_boundary_are_grouped() {
+    #[rstest]
+    #[case::at_boundary(11.0, 1)]
+    #[case::outside_boundary(11.01, 0)]
+    fn duration_groups_respect_the_tolerance_boundary(
+        #[case] duration: f64,
+        #[case] expected_groups: usize,
+    ) {
         let entries = vec![entry("a.mp4", 100), entry("b.mp4", 200)];
         let lookup = HashMap::from([
             ("a.mp4".to_string(), info(MediaKind::Video, 10.0)),
-            ("b.mp4".to_string(), info(MediaKind::Video, 11.0)),
+            ("b.mp4".to_string(), info(MediaKind::Video, duration)),
         ]);
 
         let groups = cluster_by_duration(&entries, &lookup, 1.0, &HashSet::new());
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].files.len(), 2);
-        assert_eq!(groups[0].reclaimable_bytes, 100);
-    }
-
-    #[test]
-    fn durations_just_outside_the_tolerance_stay_separate() {
-        let entries = vec![entry("a.mp4", 100), entry("b.mp4", 200)];
-        let lookup = HashMap::from([
-            ("a.mp4".to_string(), info(MediaKind::Video, 10.0)),
-            ("b.mp4".to_string(), info(MediaKind::Video, 11.01)),
-        ]);
-
-        let groups = cluster_by_duration(&entries, &lookup, 1.0, &HashSet::new());
-        assert!(groups.is_empty());
+        assert_eq!(groups.len(), expected_groups);
+        if expected_groups == 1 {
+            assert_eq!(groups[0].files.len(), 2);
+            assert_eq!(groups[0].reclaimable_bytes, 100);
+        }
     }
 
     #[test]
@@ -450,12 +446,12 @@ mod tests {
         assert_eq!(groups[0].files.len(), 2);
     }
 
-    #[test]
-    fn non_finite_durations_are_rejected() {
-        for duration in ["NaN", "inf", "-inf", "0", "-1"] {
-            let json = format!(r#"{{"format":{{"duration":"{duration}"}},"streams":[]}}"#);
-            assert!(parse_probe(json.as_bytes(), MediaKind::Video).is_none());
-        }
+    #[rstest]
+    fn non_finite_or_nonpositive_durations_are_rejected(
+        #[values("NaN", "inf", "-inf", "0", "-1")] duration: &str,
+    ) {
+        let json = format!(r#"{{"format":{{"duration":"{duration}"}},"streams":[]}}"#);
+        assert!(parse_probe(json.as_bytes(), MediaKind::Video).is_none());
     }
 
     /// A shell command: `unix` under sh, `windows` under PowerShell.

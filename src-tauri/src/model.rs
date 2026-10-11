@@ -120,6 +120,7 @@ pub fn remove_paths(summary: &mut ScanSummary, removed: &HashSet<String>) {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use rstest::rstest;
 
     fn file(path: &str, size: u64) -> DuplicateFile {
         DuplicateFile {
@@ -132,51 +133,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn removing_a_path_shrinks_the_group_and_reclaimable_total() {
-        let mut summary = ScanSummary {
-            files_scanned: 3,
-            bytes_scanned: 300,
-            exact_groups: vec![DuplicateGroup {
-                evidence: Default::default(),
-                files: vec![file("a", 100), file("b", 100), file("c", 100)],
-                reclaimable_bytes: 200,
-            }],
-            media_groups: vec![],
-            reclaimable_bytes: 200,
-            elapsed_ms: 0,
-            ffmpeg_available: false,
-            warnings: vec![],
-        };
+    #[rstest]
+    #[case::retained_pair(3, 1, 100)]
+    #[case::lone_copy(2, 0, 0)]
+    fn removing_a_path_updates_groups_and_reclaimable_total(
+        #[case] copies: usize,
+        #[case] expected_groups: usize,
+        #[case] expected_bytes: u64,
+    ) {
+        let mut summary = summary_from_group_sizes(&[vec![100; copies]]);
+        remove_paths(&mut summary, &HashSet::from(["f1".to_string()]));
 
-        remove_paths(&mut summary, &HashSet::from(["b".to_string()]));
-
-        assert_eq!(summary.exact_groups[0].files.len(), 2);
-        assert_eq!(summary.exact_groups[0].reclaimable_bytes, 100);
-        assert_eq!(summary.reclaimable_bytes, 100);
-    }
-
-    #[test]
-    fn removing_down_to_one_file_drops_the_whole_group() {
-        let mut summary = ScanSummary {
-            files_scanned: 2,
-            bytes_scanned: 200,
-            exact_groups: vec![DuplicateGroup {
-                evidence: Default::default(),
-                files: vec![file("a", 100), file("b", 100)],
-                reclaimable_bytes: 100,
-            }],
-            media_groups: vec![],
-            reclaimable_bytes: 100,
-            elapsed_ms: 0,
-            ffmpeg_available: false,
-            warnings: vec![],
-        };
-
-        remove_paths(&mut summary, &HashSet::from(["b".to_string()]));
-
-        assert!(summary.exact_groups.is_empty());
-        assert_eq!(summary.reclaimable_bytes, 0);
+        assert_eq!(summary.exact_groups.len(), expected_groups);
+        assert_eq!(summary.reclaimable_bytes, expected_bytes);
+        if expected_groups == 1 {
+            assert_eq!(summary.exact_groups[0].files.len(), 2);
+            assert_eq!(summary.exact_groups[0].reclaimable_bytes, expected_bytes);
+        }
     }
 
     fn summary_from_group_sizes(group_sizes: &[Vec<u64>]) -> ScanSummary {
