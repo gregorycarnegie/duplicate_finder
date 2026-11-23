@@ -1,6 +1,8 @@
 //! Optional, conservative media comparisons. These are review suggestions, never
 //! proof of complete equivalence: frames omit audio; audio samples omit most of a
 //! long recording. No fingerprints or file contents leave the machine.
+mod gradient;
+
 use crate::{
     media::{media_command, run_command},
     model::{DuplicateFile, DuplicateGroup, MatchEvidence, MediaKind},
@@ -21,21 +23,12 @@ enum Fingerprint {
 }
 
 fn frame_hash(pixels: &[u8]) -> Option<u64> {
-    if pixels.len() != 72 {
-        return None;
-    }
+    let pixels: &[u8; 72] = pixels.try_into().ok()?;
     let contrast = pixels.iter().max()? - pixels.iter().min()?;
     if contrast < 20 {
         return None;
     }
-    let mut hash = 0u64;
-    for (index, row) in pixels.as_chunks::<9>().0.iter().enumerate() {
-        for col in 0..8 {
-            if row[col] > row[col + 1] {
-                hash |= 1 << (index * 8 + col);
-            }
-        }
-    }
+    let hash = gradient::frame_gradient(pixels);
     (8..=56).contains(&hash.count_ones()).then_some(hash)
 }
 
@@ -254,22 +247,15 @@ fn partition(
     }
     for (fingerprint, files) in partitions {
         if files.len() > 1 {
-            result.push(DuplicateGroup {
-                files,
-                reclaimable_bytes: 0,
-                evidence: match fingerprint {
-                    Fingerprint::Video(_) => MatchEvidence::VideoFrames,
-                    Fingerprint::Audio(_) => MatchEvidence::AudioFingerprint,
-                },
-            });
+            let evidence = match fingerprint {
+                Fingerprint::Video(_) => MatchEvidence::VideoFrames,
+                Fingerprint::Audio(_) => MatchEvidence::AudioFingerprint,
+            };
+            result.push(DuplicateGroup::new(evidence, files));
         }
     }
     if unavailable.len() > 1 {
-        result.push(DuplicateGroup {
-            files: unavailable,
-            reclaimable_bytes: 0,
-            evidence: MatchEvidence::Duration,
-        });
+        result.push(DuplicateGroup::new(MatchEvidence::Duration, unavailable));
     }
     Ok(result)
 }
@@ -278,6 +264,7 @@ fn partition(
 mod tests {
     use super::*;
     use crate::{media, model::FileEntry, test_support::TestDir};
+    use googletest::prelude::{assert_that, container_eq};
     use rstest::rstest;
     fn fixture_file(path: String, kind: MediaKind, control: &ScanControl) -> DuplicateFile {
         let info = media::probe(&path, kind, control).unwrap();
@@ -338,7 +325,7 @@ mod tests {
             &["-i", &a, "-vf", "hflip", "-c:v", "mpeg4", "-q:v", "6", &c],
             &control,
         );
-        let files = [a, b, c]
+        let files = [a.clone(), b.clone(), c]
             .into_iter()
             .map(|p| fixture_file(p, MediaKind::Video, &control))
             .collect();
@@ -353,7 +340,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(groups.len(), 1, "warnings: {:?}", control.warnings());
-        assert_eq!(groups[0].files.len(), 2);
+        let paths: Vec<_> = groups[0]
+            .files
+            .iter()
+            .map(|f| f.entry.path.as_str())
+            .collect();
+        assert_that!(paths, container_eq([a.as_str(), b.as_str()]).ignore_order());
         assert!(matches!(groups[0].evidence, MatchEvidence::VideoFrames));
         assert!(control.warnings().is_empty());
     }
@@ -404,7 +396,7 @@ mod tests {
             &["-i", &a, "-c:a", "libmp3lame", "-b:a", "96k", &b],
             &control,
         );
-        let files = [a, b, c]
+        let files = [a.clone(), b.clone(), c]
             .into_iter()
             .map(|p| fixture_file(p, MediaKind::Audio, &control))
             .collect();
@@ -419,7 +411,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(groups.len(), 1, "warnings: {:?}", control.warnings());
-        assert_eq!(groups[0].files.len(), 2);
+        let paths: Vec<_> = groups[0]
+            .files
+            .iter()
+            .map(|f| f.entry.path.as_str())
+            .collect();
+        assert_that!(paths, container_eq([a.as_str(), b.as_str()]).ignore_order());
         assert!(matches!(
             groups[0].evidence,
             MatchEvidence::AudioFingerprint
@@ -670,6 +667,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(groups.len(), 2);
+        assert!(
+            groups.iter().all(|g| g.reclaimable_bytes == 1),
+            "refined groups count every copy but the largest"
+        );
         assert_eq!(paths(&groups[0]), ["a", "d"]);
         assert!(matches!(groups[0].evidence, MatchEvidence::VideoFrames));
         assert_eq!(paths(&groups[1]), ["b", "e"]);

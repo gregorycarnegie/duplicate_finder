@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accounting;
 mod commands;
 mod fingerprint;
 mod hashing;

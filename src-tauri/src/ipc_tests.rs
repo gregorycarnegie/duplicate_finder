@@ -6,6 +6,10 @@
 //! unavailable (`move_to_trash`), so removal runs the same trash-failure
 //! fallback the UI offers and nothing here can open a window or fill the trash.
 use crate::{scan_control::Operations, test_support::TestDir};
+use googletest::prelude::{
+    assert_that, container_eq, ends_with, eq, err, expect_that, gtest, len, not, some, starts_with,
+    unordered_elements_are,
+};
 use rstest::rstest;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex, atomic::Ordering};
@@ -59,14 +63,12 @@ fn scan_args(folders: &[&str], tolerance: f64) -> Value {
 }
 
 fn keys(value: &Value) -> Vec<&str> {
-    let mut keys: Vec<_> = value
+    value
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
-        .collect();
-    keys.sort();
-    keys
+        .collect()
 }
 
 /// Two 9-byte duplicates, a 9-byte different file (same size, so it is hashed
@@ -94,14 +96,14 @@ fn scan(webview: &WebviewWindow<MockRuntime>, folder: &str) -> (Value, Vec<Strin
     (view, paths)
 }
 
-#[test]
+#[gtest]
 fn scan_returns_the_view_the_results_screen_renders() {
     let (_dir, folder) = library();
     let (_app, webview) = ui();
-    let (view, paths) = scan(&webview, &folder);
-    assert_eq!(
+    let view = invoke(&webview, "scan", scan_args(&[&folder], 1.5)).unwrap();
+    expect_that!(
         keys(&view),
-        [
+        container_eq([
             "elapsedText",
             "exactGroups",
             "ffmpegAvailable",
@@ -109,43 +111,43 @@ fn scan_returns_the_view_the_results_screen_renders() {
             "mediaGroups",
             "reclaimableText",
             "warnings"
-        ]
+        ])
+        .ignore_order()
     );
     assert_eq!(view["filesScannedText"], "3 files scanned");
     assert_eq!(view["reclaimableText"], "9 B reclaimable");
-    assert!(
-        view["elapsedText"]
-            .as_str()
-            .unwrap()
-            .starts_with("finished in ")
+    expect_that!(
+        view["elapsedText"].as_str(),
+        some(starts_with("finished in "))
     );
     assert!(view["ffmpegAvailable"].is_boolean());
     assert_eq!(view["mediaGroups"], json!([]));
     assert_eq!(view["warnings"], json!([]));
 
-    assert_eq!(view["exactGroups"].as_array().unwrap().len(), 1);
+    assert_that!(view["exactGroups"].as_array(), some(len(eq(1))));
     let group = &view["exactGroups"][0];
-    assert_eq!(keys(group), ["files", "headerLeft", "headerRight"]);
+    expect_that!(
+        keys(group),
+        container_eq(["files", "headerLeft", "headerRight"]).ignore_order()
+    );
     assert_eq!(group["headerLeft"], "2 files \u{b7} 9 B each");
     assert_eq!(group["headerRight"], "9 B reclaimable");
-    for (file, name) in group["files"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(["a.bin", "b.bin"])
-    {
-        assert_eq!(
+    assert_that!(group["files"].as_array(), some(len(eq(2))));
+    let files = group["files"].as_array().unwrap();
+    let paths: Vec<_> = files.iter().filter_map(|f| f["path"].as_str()).collect();
+    expect_that!(
+        paths,
+        unordered_elements_are![ends_with("a.bin"), ends_with("b.bin")]
+    );
+    for file in files {
+        expect_that!(
             keys(file),
-            ["detailText", "path", "playable", "size", "sizeText"]
+            container_eq(["detailText", "path", "playable", "size", "sizeText"]).ignore_order()
         );
         assert_eq!(file["size"], 9);
         assert_eq!(file["sizeText"], "9 B");
         assert_eq!(file["playable"], false);
-        assert!(!file["detailText"].as_str().unwrap().is_empty());
-        assert!(
-            paths.iter().any(|p| p.ends_with(name)),
-            "{name} missing from {paths:?}"
-        );
+        expect_that!(file["detailText"].as_str(), some(not(eq(""))));
     }
 }
 
@@ -162,14 +164,14 @@ fn scan_progress_events_carry_the_fields_the_scanning_screen_reads() {
     });
     scan(&webview, &folder);
     // Each phase's first event and its completion always pass the throttle.
-    assert_eq!(
-        *events.lock().unwrap(),
-        [
+    assert_that!(
+        &*events.lock().unwrap(),
+        container_eq([
             json!({ "phase": "walking", "folder": folder, "filesFound": 3 }),
             json!({ "phase": "hashing", "done": 3, "total": 3 }),
             json!({ "phase": "verifying", "done": 1, "total": 2 }),
             json!({ "phase": "verifying", "done": 2, "total": 2 }),
-        ]
+        ])
     );
 }
 
@@ -231,13 +233,13 @@ fn file_actions_only_accept_paths_from_the_latest_scan(#[case] cmd: &str, #[case
 const ONLY_FALLBACK: &str =
     "Permanent deletion is only available for files that could not be trashed.";
 
-#[test]
+#[gtest]
 fn removal_requires_a_scan_and_reports_failures_in_the_shape_the_ui_reads() {
     let (_dir, folder) = library();
     let (_app, webview) = ui();
-    assert_eq!(
+    assert_that!(
         invoke(&webview, "trash_files", json!({ "paths": [folder] })),
-        Err(json!("Run a scan before removing files"))
+        err(eq(&json!("Run a scan before removing files")))
     );
     let (_, paths) = scan(&webview, &folder);
     // Every copy selected: validation fails before the trash is tried.
@@ -247,22 +249,26 @@ fn removal_requires_a_scan_and_reports_failures_in_the_shape_the_ui_reads() {
         json!({ "paths": paths, "verifyContents": true }),
     )
     .unwrap();
-    assert_eq!(keys(&result), ["failures", "summary"]);
-    assert_eq!(
-        result["summary"]["exactGroups"].as_array().unwrap().len(),
-        1
+    expect_that!(
+        keys(&result),
+        container_eq(["failures", "summary"]).ignore_order()
+    );
+    expect_that!(
+        result["summary"]["exactGroups"].as_array(),
+        some(len(eq(1)))
     );
     let failures = result["failures"].as_array().unwrap();
-    assert_eq!(failures.len(), 2);
+    assert_that!(failures, len(eq(2)));
     for (failure, path) in failures.iter().zip(&paths) {
-        assert_eq!(keys(failure), ["canDeletePermanently", "error", "path"]);
+        expect_that!(
+            keys(failure),
+            container_eq(["canDeletePermanently", "error", "path"]).ignore_order()
+        );
         assert_eq!(failure["path"], json!(path));
         assert_eq!(failure["canDeletePermanently"], false);
-        assert!(
-            failure["error"]
-                .as_str()
-                .unwrap()
-                .starts_with("Keep at least one")
+        expect_that!(
+            failure["error"].as_str(),
+            some(starts_with("Keep at least one"))
         );
     }
 }

@@ -88,6 +88,22 @@ The browser suite finds Chrome or Chromium on `PATH`, or takes `CHROME_BIN`. A m
 
 `DUPLICATE_FINDER_STRESS_FILES` can override the scale fixture count (at least 100, divisible by 100). Native trash tests touch only their uniquely named generated fixtures. The native startup script requires Linux, Xvfb, and `dbus-run-session`. Real audio tests require FFmpeg with Chromaprint and MP3 encoding support.
 
+### Inline Verus proofs
+
+Install the pinned [Verus 0.2026.11.02.8bf68ee](https://github.com/verus-lang/verus/releases/tag/release%2F0.2026.11.02.8bf68ee) release and Rust 1.99.1, the toolchain that release requires. Then run these commands from the repository root:
+
+```sh
+verus --no-cheating --crate-type lib --edition 2024 src-tauri/src/accounting.rs
+verus --no-cheating --crate-type lib --edition 2024 src-tauri/src/fingerprint/gradient.rs
+python3 tests/check_verus_crates.py path/to/verus-x86-linux/version.json
+```
+
+The contracts in `accounting.rs` prove the accumulator's empty state and each update preserve the sum of file sizes excluding the largest copy, capped at `u64::MAX`. They also prove the corresponding calculation for same-size exact groups. The proof in `gradient.rs` checks both pixel indices and proves what each bit in the 64-bit video gradient represents.
+
+The app builds and calls these same functions, but Cargo compiles them with the `vstd` and `verus_*` crates from crates.io, not with the Verus release. The pinned crates (`0.0.0-2026-11-01-0251`) were published from Verus commit `9efe4d9`, a version-number bump next to the release commit `8bf68ee`; their sources are otherwise identical. `tests/check_verus_crates.py` checks this for every Verus crate in `Cargo.lock`, and CI runs it, so updating one pin without the other fails the `verify` job. CI also checks that the release requires the same toolchain that the test and build jobs use (`RUST_TOOLCHAIN` in `ci.yml`), so the proofs, tests and shipped binary all compile with one rustc.
+
+Cargo tests cover the integration of these functions with scan summaries and media matching, as well as the filesystem and IPC behavior around them. Property tests compare the accumulator and the same-size calculation with a reference in 128-bit arithmetic, using file sizes near `u64::MAX` so that sums overflow.
+
 ## Media comparison design and limits
 
 “Compare media content” is optional because it requires additional decoding. Video comparisons use 64-bit gradient hashes from frames at 20%, 50%, and 80% of the duration. Low-detail frames are rejected. Audio comparisons use three segments of up to 15 seconds with [FFmpeg's Chromaprint muxer](https://ffmpeg.org/ffmpeg-formats.html#chromaprint); short or repetitive fingerprints are rejected. The raw representation follows [FFmpeg's muxer implementation](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/chromaprint.c).

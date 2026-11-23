@@ -1,4 +1,5 @@
 use crate::{
+    accounting::exact_group_bytes,
     model::{DuplicateFile, DuplicateGroup, FileEntry, MediaInfo},
     scan_control::{FileStamp, ScanControl},
 };
@@ -185,7 +186,7 @@ pub fn find_exact_duplicates_controlled<F: Fn(u64, u64) + Sync>(
         .into_iter()
         .filter(|(_, files)| files.len() > 1)
         .map(|((size, _), files)| {
-            let reclaimable_bytes = size * (files.len() as u64 - 1);
+            let reclaimable_bytes = exact_group_bytes(size, files.len() as u64);
             DuplicateGroup {
                 evidence: Default::default(),
                 files: files
@@ -204,6 +205,7 @@ pub fn find_exact_duplicates_controlled<F: Fn(u64, u64) + Sync>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use googletest::prelude::{assert_that, container_eq};
     use proptest::prelude::*;
     use std::{fs, hint::black_box, io::Write, path::PathBuf, time::Instant};
 
@@ -292,17 +294,17 @@ mod tests {
         );
         assert!(control.warnings().is_empty(), "{:?}", control.warnings());
         assert_eq!(groups.len(), 1);
-        let mut paths: Vec<_> = groups[0]
+        let paths: Vec<_> = groups[0]
             .files
             .iter()
-            .map(|f| f.entry.path.clone())
+            .map(|f| f.entry.path.as_str())
             .collect();
-        paths.sort();
-        assert_eq!(paths, [a, b]);
+        assert_that!(paths, container_eq([a.as_str(), b.as_str()]).ignore_order());
         // The sampled-out file counts as done up front; each full hash adds one.
-        let mut progress = progress.into_inner().unwrap();
-        progress.sort();
-        assert_eq!(progress, [(1, 3), (2, 3), (3, 3)]);
+        assert_that!(
+            progress.into_inner().unwrap(),
+            container_eq([(1, 3), (2, 3), (3, 3)]).ignore_order()
+        );
     }
 
     #[test]
