@@ -1,3 +1,4 @@
+use crate::accounting::reclaimable_bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -48,7 +49,21 @@ pub enum MatchEvidence {
 pub struct DuplicateGroup {
     pub evidence: MatchEvidence,
     pub files: Vec<DuplicateFile>,
+    /// Bytes in every copy but the largest, capped at `u64::MAX`. Media groups
+    /// carry it too, but only exact groups count toward the summary total.
     pub reclaimable_bytes: u64,
+}
+
+impl DuplicateGroup {
+    pub fn new(evidence: MatchEvidence, files: Vec<DuplicateFile>) -> Self {
+        let mut group = Self {
+            evidence,
+            files,
+            reclaimable_bytes: 0,
+        };
+        recompute_group(&mut group);
+        group
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -90,9 +105,7 @@ pub enum ScanProgress {
 }
 
 fn recompute_group(group: &mut DuplicateGroup) {
-    let total: u64 = group.files.iter().map(|f| f.entry.size).sum();
-    let max = group.files.iter().map(|f| f.entry.size).max().unwrap_or(0);
-    group.reclaimable_bytes = total.saturating_sub(max);
+    group.reclaimable_bytes = reclaimable_bytes(group.files.iter().map(|f| f.entry.size));
 }
 
 /// Drops the given paths from every group (used after a trash/delete
@@ -113,12 +126,14 @@ pub fn remove_paths(summary: &mut ScanSummary, removed: &HashSet<String>) {
         .exact_groups
         .iter()
         .map(|g| g.reclaimable_bytes)
-        .sum();
+        .fold(0, u64::saturating_add);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounting::tests::{expected_reclaimable_bytes, file_size};
+    use googletest::prelude::{assert_that, container_eq};
     use proptest::prelude::*;
     use rstest::rstest;
 
@@ -165,16 +180,17 @@ mod tests {
                         file(&path, size)
                     })
                     .collect();
-                let total: u64 = sizes.iter().sum();
-                let max = sizes.iter().copied().max().unwrap_or(0);
                 DuplicateGroup {
                     evidence: Default::default(),
                     files,
-                    reclaimable_bytes: total - max,
+                    reclaimable_bytes: expected_reclaimable_bytes(sizes),
                 }
             })
             .collect();
-        let reclaimable_bytes = exact_groups.iter().map(|g| g.reclaimable_bytes).sum();
+        let reclaimable_bytes = exact_groups
+            .iter()
+            .map(|g| g.reclaimable_bytes)
+            .fold(0, u64::saturating_add);
 
         ScanSummary {
             files_scanned: idx as u64,
@@ -186,6 +202,27 @@ mod tests {
             ffmpeg_available: false,
             warnings: vec![],
         }
+    }
+
+    #[rstest]
+    #[case::only_full_group_overflows(&[vec![1, 17, u64::MAX]], vec![17], 17)]
+    #[case::reclaimable_group_overflows(&[vec![1, u64::MAX, u64::MAX, 1]], vec![u64::MAX], u64::MAX)]
+    #[case::summary_overflows(&[vec![1, u64::MAX, u64::MAX - 4], vec![5, 5]], vec![u64::MAX - 4, 5], u64::MAX)]
+    fn reclaimable_counts_after_removal_saturate_only_when_the_result_overflows(
+        #[case] group_sizes: &[Vec<u64>],
+        #[case] expected_groups: Vec<u64>,
+        #[case] expected_total: u64,
+    ) {
+        let mut summary = summary_from_group_sizes(group_sizes);
+        remove_paths(&mut summary, &HashSet::from(["f0".into()]));
+
+        let group_bytes: Vec<_> = summary
+            .exact_groups
+            .iter()
+            .map(|g| g.reclaimable_bytes)
+            .collect();
+        assert_that!(group_bytes, container_eq(expected_groups));
+        assert_eq!(summary.reclaimable_bytes, expected_total);
     }
 
     #[test]
@@ -208,7 +245,7 @@ mod tests {
     proptest! {
         #[test]
         fn remove_paths_upholds_its_invariants(
-            group_sizes in prop::collection::vec(prop::collection::vec(1u64..1_000, 2..6), 0..5),
+            group_sizes in prop::collection::vec(prop::collection::vec(file_size(), 2..6), 0..5),
             removal_mask in prop::collection::vec(any::<bool>(), 0..30),
         ) {
             let mut summary = summary_from_group_sizes(&group_sizes);
@@ -226,17 +263,17 @@ mod tests {
 
             remove_paths(&mut summary, &removed);
 
-            let mut expected_total = 0u64;
+            let mut expected_total = 0u128;
             for group in &summary.exact_groups {
                 prop_assert!(group.files.len() > 1);
                 for f in &group.files {
                     prop_assert!(!removed.contains(&f.entry.path));
                 }
-                let total: u64 = group.files.iter().map(|f| f.entry.size).sum();
-                let max = group.files.iter().map(|f| f.entry.size).max().unwrap();
-                prop_assert_eq!(group.reclaimable_bytes, total - max);
-                expected_total += group.reclaimable_bytes;
+                let sizes: Vec<u64> = group.files.iter().map(|f| f.entry.size).collect();
+                prop_assert_eq!(group.reclaimable_bytes, expected_reclaimable_bytes(&sizes));
+                expected_total += u128::from(group.reclaimable_bytes);
             }
+            let expected_total = expected_total.min(u128::from(u64::MAX)) as u64;
             prop_assert_eq!(summary.reclaimable_bytes, expected_total);
         }
     }

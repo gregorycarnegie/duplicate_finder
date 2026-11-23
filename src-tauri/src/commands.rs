@@ -224,7 +224,7 @@ fn run_scan<R: Runtime>(
     };
     let mut summary = ScanSummary {
         files_scanned: entries.len() as u64,
-        bytes_scanned: entries.iter().map(|e| e.size).sum(),
+        bytes_scanned: entries.iter().map(|e| e.size).fold(0, u64::saturating_add),
         exact_groups,
         media_groups,
         reclaimable_bytes: 0,
@@ -540,6 +540,9 @@ mod tests {
         model::{DuplicateFile, FileEntry},
         test_support::TestDir,
     };
+    use googletest::prelude::{
+        assert_that, elements_are, eq, is_empty, matches_pattern, starts_with,
+    };
     use rstest::rstest;
 
     fn fixture() -> (
@@ -696,16 +699,29 @@ mod tests {
                     std::fs::remove_file(p).map_err(|e| e.to_string())
                 }
             });
-        assert_eq!(removed, HashSet::from([paths[1].clone()]));
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].can_delete_permanently);
-        assert_eq!(failures[0].error, "Trash not supported");
+        assert_that!(removed, elements_are![eq(&paths[1])]);
+        assert_that!(
+            failures,
+            elements_are![matches_pattern!(OpFailure {
+                path: eq(&paths[0]),
+                error: eq("Trash not supported"),
+                can_delete_permanently: eq(&true),
+            })]
+        );
         std::fs::write(&paths[0], b"edit").unwrap();
-        let (_, failures) = remove_checked(&paths[..1], &snapshots, &groups, true, false, |_| {
-            panic!("must not remove")
-        });
-        assert_eq!(failures.len(), 1);
-        assert!(!failures[0].can_delete_permanently);
+        let (removed, failures) =
+            remove_checked(&paths[..1], &snapshots, &groups, true, false, |_| {
+                panic!("must not remove")
+            });
+        assert_that!(removed, is_empty());
+        assert_that!(
+            failures,
+            elements_are![matches_pattern!(OpFailure {
+                path: eq(&paths[0]),
+                error: starts_with("File changed since scanning"),
+                can_delete_permanently: eq(&false),
+            })]
+        );
     }
 
     #[test]

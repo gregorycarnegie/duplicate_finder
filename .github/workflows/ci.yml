@@ -6,7 +6,44 @@ on:
   pull_request:
     branches: [master]
 
+env:
+  # Verus requires this exact toolchain. Tests and builds use it too, so the
+  # proofs, the tests and the shipped binary all compile with the same rustc.
+  RUST_TOOLCHAIN: 1.99.1
+
 jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Verus and Rust toolchain
+        env:
+          VERUS_VERSION: 0.2026.11.02.8bf68ee
+          VERUS_SHA256: f3a0119292df8855e4435da8130bee1873b0e6a60c306accf81a08ea687bba3c
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          archive="verus-${VERUS_VERSION}-x86-linux.zip"
+          curl --fail --silent --show-error --location \
+            "https://github.com/verus-lang/verus/releases/download/release%2F${VERUS_VERSION}/${archive}" \
+            --output "$RUNNER_TEMP/$archive"
+          echo "$VERUS_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/$archive" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/verus-x86-linux" >> "$GITHUB_PATH"
+          required=$(jq -r .verus.toolchain "$RUNNER_TEMP/verus-x86-linux/version.json")
+          case "$required" in
+            "$RUST_TOOLCHAIN"-*) ;;
+            *) echo "Verus requires $required but RUST_TOOLCHAIN is $RUST_TOOLCHAIN"; exit 1 ;;
+          esac
+
+      - name: Check vstd crates match the Verus release
+        run: python3 tests/check_verus_crates.py "$RUNNER_TEMP/verus-x86-linux/version.json"
+
+      - name: Verify inline proofs
+        run: |
+          verus --no-cheating --crate-type lib --edition 2024 src-tauri/src/accounting.rs
+          verus --no-cheating --crate-type lib --edition 2024 src-tauri/src/fingerprint/gradient.rs
+
   test:
     strategy:
       fail-fast: false
@@ -23,7 +60,9 @@ jobs:
           sudo apt install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev ffmpeg xvfb dbus-x11
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
         with:

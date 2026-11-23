@@ -259,20 +259,16 @@ fn cluster_sorted(
 
     let flush = |cluster: &mut Vec<&(&FileEntry, &MediaInfo)>, groups: &mut Vec<DuplicateGroup>| {
         if cluster.len() > 1 {
-            let max_size = cluster.iter().map(|(e, _)| e.size).max().unwrap_or(0);
-            let total_size: u64 = cluster.iter().map(|(e, _)| e.size).sum();
-
-            groups.push(DuplicateGroup {
-                evidence: Default::default(),
-                files: cluster
+            groups.push(DuplicateGroup::new(
+                Default::default(),
+                cluster
                     .iter()
                     .map(|(e, info)| DuplicateFile {
                         entry: (*e).clone(),
                         media: Some((*info).clone()),
                     })
                     .collect(),
-                reclaimable_bytes: total_size.saturating_sub(max_size),
-            });
+            ));
         }
         cluster.clear();
     };
@@ -647,12 +643,14 @@ mod tests {
         #[test]
         fn clusters_stay_within_tolerance_and_never_reuse_a_file(
             durations in prop::collection::vec(0.0f64..1000.0, 0..12),
+            sizes in prop::collection::vec(crate::accounting::tests::file_size(), 12),
             tolerance in 0.0f64..5.0,
         ) {
             let entries: Vec<FileEntry> = durations
                 .iter()
+                .zip(&sizes)
                 .enumerate()
-                .map(|(i, _)| entry(&format!("f{i}.mp4"), (i as u64 + 1) * 100))
+                .map(|(i, (_, &size))| entry(&format!("f{i}.mp4"), size))
                 .collect();
             let lookup: HashMap<String, MediaInfo> = entries
                 .iter()
@@ -674,9 +672,11 @@ mod tests {
                 group_durations.sort_by(f64::total_cmp);
                 prop_assert!(group_durations.last().unwrap() - group_durations[0] <= tolerance + 1e-9);
 
-                let total: u64 = group.files.iter().map(|f| f.entry.size).sum();
-                let max = group.files.iter().map(|f| f.entry.size).max().unwrap();
-                prop_assert_eq!(group.reclaimable_bytes, total - max);
+                let sizes: Vec<u64> = group.files.iter().map(|f| f.entry.size).collect();
+                prop_assert_eq!(
+                    group.reclaimable_bytes,
+                    crate::accounting::tests::expected_reclaimable_bytes(&sizes)
+                );
 
                 for f in &group.files {
                     prop_assert!(seen.insert(f.entry.path.clone()), "path grouped twice");

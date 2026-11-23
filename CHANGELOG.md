@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Cap reclaimable-space and scanned-byte totals at `u64::MAX` instead of overflowing on very large files or groups.
+- Give media groups a consistent per-group reclaimable size, whichever comparison produced them; they stay outside the reclaimable-space total.
+- Prove the reclaimable-space accounting (`accounting.rs`) and the video-frame gradient hash (`fingerprint/gradient.rs`) with inline Verus proofs, checked in a new `verify` CI job.
+- Check in CI that the `vstd` crates the app builds with have the same source as the Verus release that checks the proofs, and build, test and verify with one pinned Rust toolchain (1.99.1).
+- Add property tests that compare reclaimable-space sums against 128-bit reference arithmetic with file sizes near `u64::MAX`.
+- Use googletest matchers in assertions and update rstest to 0.29.
+
 ## 0.6.1 - 2026-10-03
 
 - Fix the scanning screen's "files found" counter, which never updated because progress events sent `files_found` instead of `filesFound`.
