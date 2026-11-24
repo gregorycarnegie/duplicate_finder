@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.2 - 2026-11-24
 
 - Cap reclaimable-space and scanned-byte totals at `u64::MAX` instead of overflowing on very large files or groups.
 - Give media groups a consistent per-group reclaimable size, whichever comparison produced them; they stay outside the reclaimable-space total.
